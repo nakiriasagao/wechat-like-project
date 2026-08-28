@@ -24,6 +24,7 @@ export const BizCode = {
   GROUP_NOT_FOUND: 30004,
   MESSAGE_NOT_FOUND: 30005,
   REPORT_NOT_FOUND: 30006,
+  MOMENT_NOT_FOUND: 30007,
 
   // 权限 (403) —— 与 permissions.ts 对应
   FORBIDDEN: 40300,

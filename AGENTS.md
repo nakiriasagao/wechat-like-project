@@ -60,7 +60,7 @@ server/src/index.ts        # 入口：migrate() 后 buildApp().listen()
 server/src/app.ts          # 全部路由集中在此，按模块挂 requireAuth/guard/guardGroup
 server/src/middleware/     # auth(JWT+禁用校验) / guard(权限) / error(AppError->JSON)
 server/src/db/             # database(SQLite+tx) / migrate(idempotent建表，boot时执行) / seed
-server/src/modules/{auth,friend,conversation,message,group,report,admin}/controller.ts
+server/src/modules/{auth,friend,conversation,message,group,report,moment,admin}/controller.ts
 shared/src/                # 根级独立 workspace，被 server 以 "shared" 导入
   role.ts  report.ts  error.ts(BizCode)  permissions.ts(矩阵)  AppError.ts
 web/    index.html + src/{api,app}.js + style.css   # 用户端 SPA（vanilla-JS，server.mjs 静态托管）

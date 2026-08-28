@@ -107,6 +107,32 @@ export function migrate() {
       created_at  INTEGER NOT NULL,
       updated_at  INTEGER NOT NULL
     );
+
+    -- 朋友圈（仅好友 + 本人可见，见 docs/design.md §3.6）
+    CREATE TABLE IF NOT EXISTS moments (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      author_id  INTEGER NOT NULL,
+      content    TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_moments_author ON moments(author_id);
+
+    CREATE TABLE IF NOT EXISTS moment_likes (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      moment_id  INTEGER NOT NULL,
+      user_id    INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(moment_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS moment_comments (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      moment_id  INTEGER NOT NULL,
+      user_id    INTEGER NOT NULL,
+      reply_to   INTEGER,                -- 回复的评论 id（可选）
+      content    TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
   `);
 
   // 为已存在的旧库补充字段（SQLite 无 ADD COLUMN IF NOT EXISTS，用 try/catch 幂等）：

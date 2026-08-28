@@ -51,7 +51,7 @@ function getConversationPartner(convId: number, userId: number): number {
 export function listMessages(req: Request, res: Response) {
   const convId = Number(req.params.convId);
   const before = Number(req.query.before ?? Number.MAX_SAFE_INTEGER);
-  const limit = Math.min(Number(req.query.limit ?? 30), 100);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
   const userId = req.user!.id;
 
   const member = getMember(convId, userId);

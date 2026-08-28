@@ -11,6 +11,7 @@ import * as message from "./modules/message/controller.js";
 import * as group from "./modules/group/controller.js";
 import * as report from "./modules/report/controller.js";
 import * as admin from "./modules/admin/controller.js";
+import * as moments from "./modules/moments/controller.js";
 
 export function buildApp() {
   const app = express();
@@ -75,6 +76,13 @@ export function buildApp() {
   api.post("/reports/:reportId/appeal", requireAuth, report.createAppeal);
   api.post("/reports/:reportId/decide", requireAuth, guard("report:punish"), report.decideAppeal);
   api.get("/reports/:reportId/events", requireAuth, report.reportEvents);
+
+  // 朋友圈（好友可见，requireAuth 即可，无角色限制）
+  api.post("/moments", requireAuth, moments.publish);
+  api.get("/moments", requireAuth, moments.timeline);
+  api.post("/moments/:momentId/like", requireAuth, moments.toggleLike);
+  api.post("/moments/:momentId/comment", requireAuth, moments.comment);
+  api.delete("/moments/:momentId", requireAuth, moments.remove);
 
   // 平台管理（管理员 / 超管）
   api.get("/admin/stats", requireAuth, guard("stats:view"), admin.stats);

@@ -51,7 +51,7 @@ function timeStr(ts) {
 // ---------- 全局状态 ----------
 const S = {
   me: currentUser(),
-  nav: "chats", // chats | contacts
+  nav: "chats", // chats | contacts | moments
   convs: [],
   active: null,
   msgs: [],
@@ -59,6 +59,7 @@ const S = {
   blacklist: [],
   requests: { incoming: [], outgoing: [] },
   conv: null,
+  moments: [],
   searchQ: "",
   timer: null,
 };
@@ -163,6 +164,7 @@ function renderNav() {
   const icons = {
     chats: { label: "聊天", svg: chatSvg() },
     contacts: { label: "通讯录", svg: contactSvg() },
+    moments: { label: "朋友圈", svg: momentsSvg() },
   };
   const items = Object.entries(icons).map(([key, it]) =>
     h("div", { class: `rail-item ${S.nav === key ? "active" : ""}`, onclick: () => { S.nav = key; S.searchQ = ""; S.active = null; render(); } },
@@ -176,13 +178,18 @@ function renderNav() {
 
 // ================= 中间列 =================
 function renderSidebar() {
+  const isMoments = S.nav === "moments";
+  const inputAttrs = { id: "search-input", placeholder: isMoments ? "朋友圈" : (S.nav === "contacts" ? "搜索朋友" : "搜索"), value: S.searchQ || "" };
+  if (!isMoments) inputAttrs.oninput = (e) => { S.searchQ = e.target.value; renderSidebarContent(); };
   const search = h("div", { class: "search" },
-    h("span", { class: "search-ico", html: searchSvg() }),
-    h("input", { id: "search-input", placeholder: S.nav === "contacts" ? "搜索朋友" : "搜索", value: S.searchQ || "", oninput: (e) => { S.searchQ = e.target.value; renderSidebarContent(); } }));
-  const extra = h("div", { class: "sidebar-extra" },
-    h("div", { class: "icon-btn", title: "添加好友", onclick: openAddFriendPage, html: plusSvg() }),
-    h("div", { class: "icon-btn", title: "发起群聊", onclick: openCreateGroup, html: groupSvg() }),
-    h("div", { class: "icon-btn", title: "我的举报", onclick: openReports, html: flagSvg() }));
+    h("span", { class: "search-ico", html: isMoments ? momentsSvg() : searchSvg() }),
+    h("input", inputAttrs));
+  const extra = isMoments
+    ? h("div", { class: "sidebar-extra" }, h("div", { class: "icon-btn", title: "发布动态", onclick: openMomentComposer, html: momentCamSvg() }))
+    : h("div", { class: "sidebar-extra" },
+        h("div", { class: "icon-btn", title: "添加好友", onclick: openAddFriendPage, html: plusSvg() }),
+        h("div", { class: "icon-btn", title: "发起群聊", onclick: openCreateGroup, html: groupSvg() }),
+        h("div", { class: "icon-btn", title: "我的举报", onclick: openReports, html: flagSvg() }));
   return h("div", { class: "sidebar" },
     h("div", { class: "sidebar-head" }, search, extra),
     h("div", { class: "panel-list", id: "panel-list" }));
@@ -192,13 +199,25 @@ function renderSidebarContent() {
   if (!list) return;
   list.replaceChildren();
   const q = S.searchQ.trim();
-  if (S.nav === "contacts") {
+  if (S.nav === "moments") {
+    renderMomentSidebar(list);
+  } else if (S.nav === "contacts") {
     renderContactsList(list, q);
   } else if (q) {
     renderUserSearch(list, q);
   } else {
     renderConversationList(list);
   }
+}
+function renderMomentSidebar(list) {
+  list.replaceChildren();
+  list.appendChild(h("div", { class: "frow", onclick: openMomentComposer },
+    avatarOf(S.me, "lg"),
+    h("div", { class: "fname" },
+      h("div", { class: "n", text: S.me.nickname }),
+      h("div", { class: "s", text: "点击发布朋友圈动态" }))));
+  list.appendChild(h("div", { class: "group-label", text: "朋友圈" }));
+  list.appendChild(h("div", { class: "empty", text: "仅好友 + 本人可见的动态会出现在右侧。" }));
 }
 
 // ----- 会话列表 -----
@@ -335,6 +354,7 @@ async function renderContactsList(list, q) {
 
 // ================= 右侧主区 =================
 function renderMain() {
+  if (S.nav === "moments") return renderMoments();
   if (S.active) return renderChat();
   return h("div", { class: "main" },
     h("div", { class: "chat-header" },
@@ -932,6 +952,141 @@ function targetLabel(t) { return { MESSAGE: "消息", USER: "用户", GROUP: "�
 function catLabel(c) { return { HARASSMENT: "骚扰", AD: "广告", ILLEGAL: "违法", PORNOGRAPHY: "涉黄", FRAUD: "诈骗", OTHER: "其他" }[c] || c; }
 function statusLabel(s) { return { PENDING: "待处理", REVIEWING: "处理中", ESCALATED: "已升级", PUNISHED: "已处罚", REJECTED: "已驳回", APPEALING: "申诉中", SUSTAINED: "维持处罚", REVERTED: "已撤销" }[s] || s; }
 
+// ================= 朋友圈 =================
+let momentReply = null; // { momentId, replyTo, nickname }
+
+function renderMoments() {
+  const header = h("div", { class: "chat-header" },
+    h("div", { class: "htitle", text: "朋友圈" }),
+    h("div", { class: "h-ops" },
+      h("div", { class: "icon-btn", title: "发布动态", onclick: openMomentComposer, html: momentCamSvg() })));
+  const feed = h("div", { class: "moment-feed", id: "moment-feed" });
+  const main = h("div", { class: "main moment-main" }, header, feed);
+  requestAnimationFrame(() => renderMomentFeed());
+  return main;
+}
+async function renderMomentFeed() {
+  const el = document.getElementById("moment-feed");
+  if (!el) return;
+  const scrollTop = el.scrollTop;
+  el.replaceChildren();
+  try {
+    S.moments = (await get("/moments")).items || [];
+  } catch (e) {
+    el.appendChild(h("div", { class: "empty", text: e.message }));
+    return;
+  }
+  el.replaceChildren();
+  if (!S.moments.length) {
+    el.appendChild(h("div", { class: "empty", text: "还没有动态，发布你的第一条朋友圈吧。" }));
+    return;
+  }
+  for (const m of S.moments) el.appendChild(momentCard(m));
+  // 点赞/评论/删除后重新拉取会清空列表，还原滚动位置避免列表跳回顶部
+  el.scrollTop = scrollTop;
+}
+function momentCard(m) {
+  const mine = m.author.id === S.me.id;
+  const head = h("div", { class: "moment-head" },
+    avatarOf({ nickname: m.author.nickname }),
+    h("div", { class: "grow" },
+      h("div", { class: "author", text: m.author.nickname + (mine ? "（我）" : "") }),
+      h("div", { class: "mtime", text: momentTime(m.createdAt) })),
+    mine ? h("button", { class: "small danger", onclick: () => deleteMoment(m), text: "删除" }) : "");
+  const actions = h("div", { class: "m-actions" },
+    h("span", { class: `like ${m.likedByMe ? "on" : ""}`, onclick: () => toggleMomentLike(m), text: `${m.likedByMe ? "❤️" : "🤍"} ${m.likeCount || ""}`.trim() }),
+    h("span", { class: "cmt", onclick: () => focusMomentComment(m.id), text: "评论" }));
+  const comments = h("div", { class: "m-comments" },
+    ...m.comments.map((c) => momentCommentRow(m, c)));
+  const input = h("div", { class: "m-comment-row" },
+    h("input", { id: `cmt-${m.id}`, placeholder: "写评论...", onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitMomentComment(m); } } }),
+    h("button", { class: "small", onclick: () => submitMomentComment(m), text: "发送" }));
+  const body = h("div", { class: "moment-body" },
+    h("div", { class: "mcontent", text: m.content }),
+    actions,
+    m.likeCount > 0 ? h("div", { class: "m-likes", text: `${m.likeCount} 人赞过` }) : "",
+    m.comments.length ? comments : "",
+    input);
+  return h("div", { class: "moment" }, head, body);
+}
+function momentCommentRow(m, c) {
+  const label = c.replyTo
+    ? h("span", {}, h("b", { text: c.nickname }), h("span", { text: " 回复 " }), h("b", { text: c.replyNickname || "?" }), h("span", { text: `：${c.content}` }))
+    : h("span", {}, h("b", { text: c.nickname }), h("span", { text: `：${c.content}` }));
+  return h("div", { class: "m-comment" },
+    label,
+    h("span", { class: "rep", onclick: () => setMomentReply(m, c), text: "回复" }));
+}
+function momentTime(ts) {
+  if (!ts) return "";
+  const d = new Date(ts), n = new Date();
+  if (d.toDateString() === n.toDateString()) return d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" }) + " " + d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+}
+function focusMomentComment(momentId) {
+  const inp = document.getElementById(`cmt-${momentId}`);
+  if (inp) { momentReply = null; inp.placeholder = "写评论..."; inp.focus(); }
+}
+function setMomentReply(m, c) {
+  momentReply = { momentId: m.id, replyTo: c.id, nickname: c.nickname };
+  const inp = document.getElementById(`cmt-${m.id}`);
+  if (inp) { inp.placeholder = `回复 @${c.nickname}`; inp.focus(); }
+}
+async function toggleMomentLike(m) {
+  try { await post(`/moments/${m.id}/like`, {}); await renderMomentFeed(); } catch (e) { toast(e.message, false); }
+}
+async function submitMomentComment(m) {
+  const inp = document.getElementById(`cmt-${m.id}`);
+  if (!inp) return;
+  const content = inp.value.trim();
+  if (!content) return;
+  const reply = momentReply && momentReply.momentId === m.id ? { replyTo: momentReply.replyTo } : {};
+  try {
+    await post(`/moments/${m.id}/comment`, { content, ...reply });
+    inp.value = ""; momentReply = null;
+    await renderMomentFeed();
+  } catch (e) { toast(e.message, false); }
+}
+async function deleteMoment(m) {
+  if (!confirm("确定删除这条动态？将同时删除其点赞与评论。")) return;
+  try { await del(`/moments/${m.id}`); toast("已删除动态"); await renderMomentFeed(); } catch (e) { toast(e.message, false); }
+}
+function openMomentComposer() {
+  const box = h("div", { class: "panel" },
+    h("div", { class: "p-header" }, h("h3", { text: "发朋友圈" }), h("span", { class: "close", onclick: closePanel, text: "✕" })),
+    h("textarea", { id: "mo-content", rows: 5, placeholder: "这一刻的想法...（文字/表情）", style: "width:100%;box-sizing:border-box;border:1px solid #f0f0f0;border-radius:8px;padding:8px;resize:vertical" }),
+    h("div", { class: "ops" },
+      h("button", { onclick: insertMomentEmoji, text: "表情" }),
+      h("button", { onclick: publishMoment, text: "发表" }),
+      h("button", { class: "secondary", onclick: closePanel, text: "取消" })));
+  overlay(box);
+  const ta = document.getElementById("mo-content");
+  if (ta) ta.focus();
+}
+function insertMomentEmoji() {
+  const ta = document.getElementById("mo-content");
+  if (!ta) return;
+  const box = emojiPanel();
+  box.addEventListener("click", (e) => {
+    if (e.target.dataset && e.target.dataset.em) {
+      ta.value += e.target.dataset.em;
+      ta.focus();
+    }
+  });
+  overlay(box, { panelOnly: true });
+}
+async function publishMoment() {
+  const ta = document.getElementById("mo-content");
+  const content = ta ? ta.value.trim() : "";
+  if (!content) return toast("内容不能为空", false);
+  try {
+    await post("/moments", { content });
+    toast("已发表");
+    closePanel();
+    if (S.nav === "moments") await renderMomentFeed();
+  } catch (e) { toast(e.message, false); }
+}
+
 // ================= 个人资料 =================
 function openProfile() {
   const box = h("div", { class: "panel" },
@@ -1008,6 +1163,12 @@ function flagSvg() {
 }
 function infoSvg() {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>`;
+}
+function momentsSvg() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M17.5 5.5c1.4 1.4 2 3 2.5 4.5M5.5 17.5C4.1 16.1 3.5 14.5 3 13M6.5 5.5C5.1 6.9 4.5 8.5 4 10M17.5 17.5c1.4-1.4 2-3 2.5-4.5"/></svg>`;
+}
+function momentCamSvg() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="7" width="18" height="14" rx="2"/><path d="M8 7l1.5-2h5L16 7"/><circle cx="12" cy="13" r="3"/></svg>`;
 }
 function emojiSvg() {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/></svg>`;

@@ -174,6 +174,30 @@ async function main() {
   r = await req("GET", `/conversations/${dm.id}/messages`, t3);
   ok("消息列表含 deletedBy", r.status === 200, `(${JSON.stringify((r.data.items[0] as any)?.deletedBy)})`);
 
+  console.log("\n[7] 朋友圈");
+  r = await req("POST", "/moments", t1, { content: "第一条动态" });
+  ok("发表朋友圈 -> 201", r.status === 201, `(${r.status})`);
+  const mom1 = r.data?.moment?.id;
+  r = await req("GET", "/moments", t2);
+  ok("好友可见动态", (r.data.items || []).some((m: any) => m.id === mom1), `(${r.status})`);
+  r = await req("POST", "/moments", t2, { content: "第二条" });
+  const mom2 = r.data?.moment?.id;
+  r = await req("GET", "/moments", t3);
+  ok("非好友不可见动态", !(r.data.items || []).some((m: any) => m.id === mom2), `(${r.status})`);
+  r = await req("POST", `/moments/${mom1}/like`, t2, {});
+  ok("点赞 -> 200", r.status === 200 && r.data?.liked === true, `(${r.status})`);
+  r = await req("POST", `/moments/${mom1}/comment`, t2, { content: "沙发" });
+  ok("评论 -> 201", r.status === 201, `(${r.status})`);
+  const cid = r.data?.comment?.id;
+  r = await req("POST", `/moments/${mom1}/comment`, t3, { content: "回复@沙发", replyTo: cid });
+  ok("回复评论 -> 201", r.status === 201, `(${r.status})`);
+  r = await req("POST", `/moments/${mom1}/comment`, t3, { content: "也是好友可见" });
+  ok("好友可评论 -> 201", r.status === 201, `(${r.status})`);
+  r = await req("DELETE", `/moments/${mom1}`, t2, {});
+  ok("删除他人动态 -> 403", r.status === 403, `(${r.status})`);
+  r = await req("DELETE", `/moments/${mom1}`, t1, {});
+  ok("删除自己的动态 -> 200", r.status === 200, `(${r.status})`);
+
   console.log("\n===== 汇总 =====");
   console.log(`通过 ${pass} / ${pass + fail}`);
   process.exit(fail ? 1 : 0);
