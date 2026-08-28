@@ -1,0 +1,16 @@
+{
+  "name": "admin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "类微信聊天软件 - 管理后台（客服 / 平台管理员 / 超管）",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs",
+    "start": "node server.mjs",
+    "build": "node --check server.mjs && node --check src/api.js && node --check src/app.js",
+    "typecheck": "node --check server.mjs && node --check src/api.js && node --check src/app.js"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}
