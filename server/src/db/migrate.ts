@@ -21,6 +21,7 @@ export function migrate() {
       user_b       INTEGER NOT NULL,
       status       TEXT NOT NULL DEFAULT 'PENDING',
       requester    INTEGER NOT NULL,
+      message      TEXT,                    -- 好友申请验证消息
       created_at   INTEGER NOT NULL,
       updated_at   INTEGER NOT NULL,
       UNIQUE(user_a, user_b)
@@ -106,6 +107,10 @@ export function migrate() {
       updated_at  INTEGER NOT NULL
     );
   `);
+
+  // 为已存在的旧库补充字段（SQLite 无 ADD COLUMN IF NOT EXISTS，用 try/catch 幂等）：
+  try { db.exec("ALTER TABLE friendships ADD COLUMN message TEXT"); } catch { /* 已存在 */ }
+  try { db.exec("ALTER TABLE conversations ADD COLUMN avatar TEXT"); } catch { /* 已存在 */ }
 }
 
 /** 最近一次本地迁移版本号（预留，当前单版本） */

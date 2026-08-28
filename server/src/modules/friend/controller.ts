@@ -28,9 +28,10 @@ export function search(req: Request, res: Response) {
   res.json({ items: rows });
 }
 
-/** 发送好友申请 */
+/** 发送好友申请（可附验证消息） */
 export function sendRequest(req: Request, res: Response) {
   const targetId = Number(req.body?.userId);
+  const note = String(req.body?.message ?? "").trim() || null;
   if (targetId === req.user!.id) throw AppError.forbidden(BizCode.CANNOT_SELF_FRIEND, "不能添加自己为好友");
   const target = getDb().prepare("SELECT id FROM users WHERE id = ?").get(targetId);
   if (!target) throw AppError.notFound(BizCode.USER_NOT_FOUND, "用户不存在");
@@ -44,8 +45,8 @@ export function sendRequest(req: Request, res: Response) {
   const a = Math.min(req.user!.id, targetId);
   const b = Math.max(req.user!.id, targetId);
   getDb()
-    .prepare("INSERT INTO friendships (user_a, user_b, status, requester, created_at, updated_at) VALUES (?, ?, 'PENDING', ?, ?, ?)")
-    .run(a, b, req.user!.id, now(), now());
+    .prepare("INSERT INTO friendships (user_a, user_b, status, requester, message, created_at, updated_at) VALUES (?, ?, 'PENDING', ?, ?, ?, ?)")
+    .run(a, b, req.user!.id, note, now(), now());
   res.status(201).json({ message: "申请已发送" });
 }
 
@@ -68,7 +69,7 @@ export function listRequests(req: Request, res: Response) {
   // 收到的申请：对方（requester）发起，我作为另一端点
   const incoming = db
     .prepare(
-      `SELECT f.requester, u.nickname, u.username, f.updated_at FROM friendships f
+      `SELECT f.requester, f.message, u.nickname, u.username, f.updated_at FROM friendships f
        JOIN users u ON u.id = f.requester
        WHERE f.status = 'PENDING' AND f.requester != ? AND (f.user_a = ? OR f.user_b = ?)`
     )
@@ -76,12 +77,24 @@ export function listRequests(req: Request, res: Response) {
   // 我发出的申请：requester 是我，对方是另一端点
   const outgoing = db
     .prepare(
-      `SELECT f.user_b as uid, u.nickname, u.username, f.updated_at FROM friendships f
+      `SELECT f.user_b as uid, f.message, u.nickname, u.username, f.updated_at FROM friendships f
        JOIN users u ON u.id = f.user_b
        WHERE f.status = 'PENDING' AND f.requester = ?`
     )
     .all(req.user!.id);
   res.json({ incoming, outgoing });
+}
+
+/** 我的黑名单（我拉黑的人） */
+export function listBlocked(req: Request, res: Response) {
+  const items = getDb()
+    .prepare(
+      `SELECT u.id as userId, u.nickname, u.username FROM friendships f
+       JOIN users u ON u.id = (CASE WHEN f.user_a = ? THEN f.user_b ELSE f.user_a END)
+       WHERE f.requester = ? AND f.status = 'BLOCKED'`
+    )
+    .all(req.user!.id, req.user!.id);
+  res.json({ items });
 }
 
 /** 接受好友申请：建立好友 + 自动创建单聊 */

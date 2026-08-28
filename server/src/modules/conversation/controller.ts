@@ -32,6 +32,7 @@ export function listConversations(req: Request, res: Response) {
       notice: r.notice,
       pin: !!r.pin,
       notify: !!r.notify,
+      muteAll: !!r.mute_all,
       myRole: r.my_role,
       unread: r.unread,
       lastMessage: last ? { senderId: last.sender_id, content: last.content, type: last.type, createdAt: last.created_at } : null,

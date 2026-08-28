@@ -34,7 +34,9 @@ export function sendMessage(req: Request, res: Response) {
       .run(convId, user.id, type, String(content), replyTo, mentions, now());
     return Number(ins.lastInsertRowid);
   });
-  const msg = db.prepare("SELECT * FROM messages WHERE id = ?").get(r);
+  const msg = db
+    .prepare("SELECT m.*, u.nickname as sender_nickname FROM messages m LEFT JOIN users u ON u.id = m.sender_id WHERE m.id = ?")
+    .get(r);
   res.status(201).json({ message: serializeMessage(msg) });
 }
 
@@ -56,7 +58,7 @@ export function listMessages(req: Request, res: Response) {
   if (!member) throw AppError.forbidden(BizCode.NOT_IN_GROUP, "你不在该会话");
 
   const rows = getDb()
-    .prepare("SELECT * FROM messages WHERE conversation_id = ? AND id < ? ORDER BY id DESC LIMIT ?")
+    .prepare("SELECT m.*, u.nickname as sender_nickname FROM messages m LEFT JOIN users u ON u.id = m.sender_id WHERE m.conversation_id = ? AND m.id < ? ORDER BY m.id DESC LIMIT ?")
     .all(convId, before, limit);
   res.json({
     items: rows.map(serializeMessage).reverse(),

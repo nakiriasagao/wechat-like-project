@@ -106,6 +106,15 @@ export function setAdmin(req: Request, res: Response) {
   res.json({ message: isAdmin === GroupRole.ADMIN ? "已设为管理员" : "已取消管理员" });
 }
 
+/** 修改群名（管理员/群主/平台） */
+export function renameGroup(req: Request, res: Response) {
+  const convId = req.convId!;
+  const name = String(req.body?.name ?? "").trim();
+  if (!name) throw AppError.bad(BizCode.INVALID_INPUT, "群名必填");
+  getDb().prepare("UPDATE conversations SET name = ? WHERE id = ?").run(name, convId);
+  res.json({ name });
+}
+
 /** 群公告（管理员/群主/平台） */
 export function updateNotice(req: Request, res: Response) {
   const convId = req.convId!;

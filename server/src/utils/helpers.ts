@@ -43,12 +43,13 @@ export function assertFriends(userA: number, userB: number) {
   return rel;
 }
 
-/** 序列化消息（含撤回/删除状态 + 已读为过滤） */
+/** 序列化消息（含撤回/删除状态 + 发送者昵称） */
 export function serializeMessage(row: any) {
   return {
     id: row.id,
     conversationId: row.conversation_id,
     senderId: row.sender_id,
+    senderNickname: row.sender_nickname ?? null,
     type: row.type,
     content: row.content,
     replyTo: row.reply_to,

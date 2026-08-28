@@ -34,6 +34,7 @@ export function buildApp() {
   api.delete("/friends/:userId", requireAuth, friend.deleteFriend);
   api.post("/friends/block", requireAuth, friend.blockUser);
   api.post("/friends/unblock", requireAuth, friend.unblockUser);
+  api.get("/friends/blacklist", requireAuth, friend.listBlocked);
 
   // 会话
   api.get("/conversations", requireAuth, conversation.listConversations);
@@ -59,6 +60,7 @@ export function buildApp() {
   api.post("/group/:convId/transfer", requireAuth, guardGroup("group:transfer"), group.transferOwner);
   api.post("/group/:convId/set-admin", requireAuth, guardGroup("group:set_admin"), group.setAdmin);
   api.post("/group/:convId/notice", requireAuth, guardGroup("group:notice"), group.updateNotice);
+  api.post("/group/:convId/rename", requireAuth, guardGroup("group:rename"), group.renameGroup);
   api.post("/group/:convId/disband", requireAuth, group.disband); // 群主/超管自检
 
   // 举报（用户可发起 -> 客服初审 -> 管理员终裁 -> 申诉）

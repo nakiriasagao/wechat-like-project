@@ -42,6 +42,7 @@ const S = {
   active: null, // active conversation
   msgs: [],
   friends: [],
+  blacklist: [],
   requests: { incoming: [], outgoing: [] },
   group: null,
   searchQ: "",
@@ -268,30 +269,45 @@ function renderMessages() {
     banner.className = "section-title";
     banner.style.cursor = "pointer";
     banner.textContent = S.active.type === "GROUP"
-      ? `群：${S.active.name} · ${S.active.notice || "点击查看成员/管理"}` : S.active.name || "单聊";
+      ? `${S.active.name}${S.active.notice ? " · " + S.active.notice : ""}`
+      : S.active.name || "单聊";
     banner.onclick = openConvPanel;
   }
-  // 移除旧消息（保留 banner 和 composer）
-  Array.from(chat.querySelectorAll(":scope > .msg, :scope > .system-msg")).forEach((el) => el.remove());
+  Array.from(chat.querySelectorAll(":scope > .msg, :scope > .system-msg, :scope > .time-chip")).forEach((el) => el.remove());
   const composer = chat.querySelector(".composer");
+  let lastTime = 0;
   for (const m of S.msgs) {
+    if (m.createdAt - lastTime > 5 * 60 * 1000) {
+      const chip = h("div", { class: "time-chip", text: timeStr(m.createdAt) });
+      chat.insertBefore(chip, composer);
+    }
+    lastTime = m.createdAt;
     if (m.recalled) {
-      const sys = h("div", { class: "system-msg", text: `${m.senderId === S.me.id ? "你" : "对方"}撤回了一条消息` });
+      const sys = h("div", { class: "system-msg", text: `${m.senderId === S.me.id ? "你" : (m.senderNickname || "对方")}撤回了一条消息` });
       chat.insertBefore(sys, composer);
       continue;
     }
     const mine = m.senderId === S.me.id;
-    const bubble = h("div", { class: "bubble", text: m.content || "" });
-    if (m.deletedBy && m.deletedBy.includes(S.me.id)) {
+    const mineDeleted = m.deletedBy && m.deletedBy.includes(S.me.id);
+    const bubble = h("div", { class: "bubble" });
+    if (mineDeleted) {
       bubble.className = "bubble muted-text";
       bubble.textContent = "（已删除）";
+    } else {
+      bubble.textContent = m.content || "";
     }
-    const meta = h("div", { class: "meta" },
-      h("span", { text: timeStr(m.createdAt) }),
-      mine && !m.recalled ? h("button", { class: "small", text: "撤回", onclick: () => recallMessage(m) }) : "",
-      mine && !m.recalled ? h("button", { class: "small", text: "删除", onclick: () => deleteMessage(m) }) : "",
-      h("button", { class: "small", text: "举报", onclick: () => openReportMessage(m) }));
-    const row = h("div", { class: `msg ${mine ? "mine" : ""}` }, bubble, h("div", {}, meta));
+    // 群聊 & 他人消息：显示发送者昵称。自己的昵称用"我"
+    const name = mine ? "" : (S.active.type === "GROUP" ? (m.senderNickname || "成员") : "");
+    const body = h("div", { class: "mbody" },
+      name ? h("div", { class: "sender", text: name }) : "",
+      bubble,
+      h("div", { class: "meta" },
+        h("span", { text: timeStr(m.createdAt) }),
+        mine && !m.recalled ? h("button", { class: "small", text: "撤回", onclick: () => recallMessage(m) }) : "",
+        mine && !m.recalled ? h("button", { class: "small", text: "删除", onclick: () => deleteMessage(m) }) : "",
+        h("button", { class: "small", text: "举报", onclick: () => openReportMessage(m) })));
+    const av = avatarOf({ nickname: mine ? S.me.nickname : (m.senderNickname || "?") }, "");
+    const row = h("div", { class: `msg ${mine ? "mine" : ""}` }, av, body);
     chat.insertBefore(row, composer);
   }
   chat.scrollTop = chat.scrollHeight;
@@ -353,9 +369,10 @@ function escapeHtml(s) {
 }
 
 async function loadFriends() {
-  const [fr, rq] = await Promise.all([get("/friends"), get("/friends/requests")]);
+  const [fr, rq, bl] = await Promise.all([get("/friends"), get("/friends/requests"), get("/friends/blacklist")]);
   S.friends = fr.items || [];
   S.requests = rq || { incoming: [], outgoing: [] };
+  S.blacklist = bl.items || [];
 }
 async function renderFriendsList(list) {
   list.replaceChildren();
@@ -372,8 +389,8 @@ async function renderFriendsList(list) {
     for (const u of res.items || []) {
       list.appendChild(h("div", { class: "frow" },
         avatarOf(u),
-        h("div", { class: "fname" }, h("div", { text: u.nickname }), h("div", { class: "muted-text", text: "@" + u.username })),
-        h("div", { class: "ops" }, h("button", { class: "small", onclick: () => sendFriendRequest(u.id), text: "加好友" }))));
+        h("div", { class: "fname" }, h("div", { class: "n", text: u.nickname }), h("div", { class: "s", text: "微信号：@" + u.username })),
+        h("div", { class: "ops" }, h("button", { class: "small", onclick: () => openAddFriend(u), text: "加好友" }))));
     }
     return;
   }
@@ -383,7 +400,10 @@ async function renderFriendsList(list) {
     for (const r of S.requests.incoming) {
       list.appendChild(h("div", { class: "frow" },
         avatarOf({ nickname: r.nickname, username: r.username }),
-        h("div", { class: "fname", text: r.nickname }),
+        h("div", { class: "fname" },
+          h("div", { class: "n", text: r.nickname }),
+          h("div", { class: "s", text: "微信号：@" + r.username }),
+          r.message ? h("div", { class: "msg-line", text: "验证消息：" + r.message }) : ""),
         h("div", { class: "ops" },
           h("button", { class: "small", onclick: () => acceptRequest(r.requester), text: "同意" }),
           h("button", { class: "small danger", onclick: () => rejectRequest(r.requester), text: "拒绝" }))));
@@ -394,7 +414,9 @@ async function renderFriendsList(list) {
     for (const r of S.requests.outgoing) {
       list.appendChild(h("div", { class: "frow" },
         avatarOf({ nickname: r.nickname, username: r.username }),
-        h("div", { class: "fname", text: r.nickname }),
+        h("div", { class: "fname" },
+          h("div", { class: "n", text: r.nickname }),
+          r.message ? h("div", { class: "msg-line", text: "验证消息：" + r.message }) : ""),
         h("div", { class: "muted-text", text: "等待确认" })));
     }
   }
@@ -403,38 +425,66 @@ async function renderFriendsList(list) {
     const u = { nickname: f.nickname, username: f.username, ...f };
     list.appendChild(h("div", { class: "frow" },
       avatarOf(u),
-      h("div", { class: "fname" }, h("div", { text: f.nickname }), h("div", { class: "muted-text", text: "@" + f.username })),
+      h("div", { class: "fname" }, h("div", { class: "n", text: f.nickname }), h("div", { class: "s", text: "微信号：@" + f.username })),
       h("div", { class: "ops" },
-        h("button", { class: "small", onclick: () => openDirectWith(f.userId), text: "聊天" }),
-        h("button", { class: "small danger", onclick: () => deleteFriend(f.userId), text: "删除" }),
-        h("button", { class: "small secondary", onclick: () => blockUser(f.userId), text: "拉黑" }))));
+        h("button", { class: "small", onclick: () => openDirectWith(f.userId), text: "发消息" }),
+        h("button", { class: "small", onclick: () => blockUser(f.userId), text: "拉黑" }),
+        h("button", { class: "small danger", onclick: () => deleteFriend(f.userId), text: "删除" }))));
   }
-  if (!S.friends.length && !S.requests.incoming.length && !S.requests.outgoing.length) {
+  // 黑名单
+  if (S.blacklist.length) {
+    list.appendChild(h("div", { class: "section-title", text: "黑名单" }));
+    for (const b of S.blacklist) {
+      list.appendChild(h("div", { class: "frow" },
+        avatarOf(b),
+        h("div", { class: "fname" }, h("div", { class: "n", text: b.nickname }), h("div", { class: "s", text: "微信号：@" + b.username })),
+        h("div", { class: "ops" }, h("button", { class: "small secondary", onclick: () => unblockUser(b.userId), text: "解除拉黑" }))));
+    }
+  }
+  if (!S.friends.length && !S.requests.incoming.length && !S.requests.outgoing.length && !S.blacklist.length) {
     list.appendChild(h("div", { class: "empty", text: "还没有好友，搜索用户名添加吧" }));
   }
 }
 
-async function sendFriendRequest(userId) {
+// 弹窗：填写验证消息再发送申请
+function openAddFriend(u) {
+  const box = h("div", { class: "panel-overlay" }, h("div", { class: "panel" },
+    h("div", { class: "p-header" }, h("h3", { text: "添加好友" }), h("span", { class: "close", onclick: closePanel, text: "✕" })),
+    h("label", { text: `你已找到：${u.nickname}（@${u.username}）` }),
+    h("div", { class: "kv" }, h("span", { text: "验证消息" }), h("span", { text: "让对方确认" })),
+    h("input", { id: "fr-message", placeholder: "例：我是张三", value: `我是 ${S.me.nickname || S.me.username}` }),
+    h("div", { class: "ops" },
+      h("button", { onclick: () => submitAddFriend(u.id), text: "发送申请" }),
+      h("button", { class: "secondary", onclick: closePanel, text: "取消" }))));
+  document.body.appendChild(box);
+}
+async function submitAddFriend(userId) {
+  const message = document.getElementById("fr-message").value.trim();
   try {
-    await post("/friends/request", { userId });
+    await post("/friends/request", { userId, message });
     toast("好友申请已发送");
-    render();
+    closePanel();
+    loadFriends().then(() => render());
   } catch (e) {
     toast(e.message, false);
   }
 }
 async function acceptRequest(userId) {
-  try { await post("/friends/accept", { userId }); toast("已添加好友"); render(); } catch (e) { toast(e.message, false); }
+  try { await post("/friends/accept", { userId }); toast("已添加好友"); loadFriends().then(() => render()); } catch (e) { toast(e.message, false); }
 }
 async function rejectRequest(userId) {
-  try { await post("/friends/reject", { userId }); toast("已拒绝"); render(); } catch (e) { toast(e.message, false); }
+  try { await post("/friends/reject", { userId }); toast("已拒绝"); loadFriends().then(() => render()); } catch (e) { toast(e.message, false); }
 }
 async function deleteFriend(userId) {
-  if (!confirm("确定删除该好友？")) return;
-  try { await del(`/friends/${userId}`); toast("已删除"); loadFriends().then(() => render()); } catch (e) { toast(e.message, false); }
+  if (!confirm("确定删除该好友？删除后将解除好友关系。")) return;
+  try { await del(`/friends/${userId}`); toast("已删除好友"); loadFriends().then(() => render()); } catch (e) { toast(e.message, false); }
 }
 async function blockUser(userId) {
-  try { await post("/friends/block", { userId }); toast("已拉黑"); loadFriends().then(() => render()); } catch (e) { toast(e.message, false); }
+  if (!confirm("加入黑名单后，对方将无法向你发消息。确定？")) return;
+  try { await post("/friends/block", { userId }); toast("已加入黑名单"); loadFriends().then(() => render()); } catch (e) { toast(e.message, false); }
+}
+async function unblockUser(userId) {
+  try { await post("/friends/unblock", { userId }); toast("已解除拉黑"); loadFriends().then(() => render()); } catch (e) { toast(e.message, false); }
 }
 async function openDirectWith(userId) {
   await post("/friends/request", { userId }).catch(() => {});
@@ -485,46 +535,105 @@ function openConvPanel() {
   const c = S.active;
   if (!c) return;
   const panel = h("div", { class: "panel" });
-  const ops = h("div", { class: "ops" });
   if (c.type === "GROUP") {
-    panel.appendChild(h("h3", { text: c.name }));
-    panel.appendChild(h("div", { class: "kv" }, h("span", { text: "我的群内角色" }), h("span", { text: myRole(c.myRole) })));
-    panel.appendChild(h("div", { class: "section-title", text: "成员" }));
-    const members = h("div", { id: "gp-members" });
-    panel.appendChild(members);
-    loadGroupInfo(c.id).then((g) => {
-      const oid = g.ownerId;
-      members.replaceChildren();
-      for (const m of g.members || []) {
-        const canManage = (c.myRole === "OWNER") || (c.myRole === "ADMIN" && m.role === "MEMBER");
-        members.appendChild(h("div", { class: "frow" },
-          avatarOf({ nickname: m.nickname, username: m.username }),
-          h("div", { class: "fname" },
-            h("div", { text: m.nickname + (m.role === "OWNER" ? " 👑" : m.role === "ADMIN" ? " ⭐" : "") }),
-            h("div", { class: "muted-text", text: "@" + m.username })),
-          canManage ? h("div", { class: "ops" },
-            h("button", { class: "small", onclick: () => muteMember(m.user_id), text: "禁言" }),
-            h("button", { class: "small danger", onclick: () => kickUser(m.user_id), text: "踢出" }),
-            c.myRole === "OWNER" ? h("button", { class: "small secondary", onclick: () => setAdmin(m.user_id, false), text: "取消管理" }) : "") : ""));
-        if (c.myRole === "OWNER" && m.role === "MEMBER") {
-          // 设置管理员按钮放在下一行
-          members.appendChild(h("div", { class: "ops", style: "padding:0 12px 8px" },
-            h("button", { class: "small", onclick: () => setAdmin(m.user_id, true), text: `设置 ${m.nickname} 为管理员` })));
-        }
-      }
-    });
-    dispatch(() => {
-      appendOpsGroup(ops, c);
-    });
+    addGroupSettings(panel, c);
   } else {
-    panel.appendChild(h("h3", { text: c.name || "单聊" }));
-    const opsWrap = h("div", { class: "ops" });
-    panel.appendChild(opsWrap);
-    opsWrap.appendChild(h("button", { class: "small danger", onclick: deleteFriend(Number(c.id)), text: "删除好友" }));
+    panel.appendChild(h("div", { class: "p-header" }, h("h3", { text: c.name || "单聊" }), h("span", { class: "close", onclick: closePanel, text: "✕" })));
+    panel.appendChild(h("div", { class: "kv" }, h("span", { text: "会话类型" }), h("span", { text: "单聊" })));
+    const ops = h("div", { class: "ops" });
+    ops.appendChild(h("button", { class: "small danger", onclick: () => deleteFriend(Number(c.id)), text: "删除好友" }));
+    ops.appendChild(h("button", { class: "small secondary", onclick: closePanel, text: "关闭" }));
+    panel.appendChild(ops);
   }
-  panel.appendChild(ops);
-  panel.appendChild(h("div", { class: "ops" }, h("button", { class: "secondary", onclick: closePanel, text: "关闭" })));
   overlay(panel);
+}
+
+// 群聊设置面板（微信风格：名称/公告/成员/管理）
+function addGroupSettings(panel, c) {
+  panel.appendChild(h("div", { class: "p-header" }, h("h3", { text: "群聊设置" }), h("span", { class: "close", onclick: closePanel, text: "✕" })));
+  panel.appendChild(h("div", { class: "kv" }, h("span", { text: "我的角色" }), h("b", { text: myRole(c.myRole) })));
+
+  const canRename = ["OWNER", "ADMIN"].includes(c.myRole) || c.myRole === "OWNER";
+  const canNotice = ["OWNER", "ADMIN"].includes(c.myRole) || c.myRole === "OWNER";
+
+  if (canRename) {
+    panel.appendChild(h("label", { text: "群聊名称" }));
+    panel.appendChild(h("div", { class: "inline-form" },
+      h("input", { id: "gp-name", placeholder: "群名", value: c.name || "" }),
+      h("button", { class: "small", onclick: renameGroup, text: "保存" })));
+  } else {
+    panel.appendChild(h("div", { class: "kv" }, h("span", { text: "群聊名称" }), h("b", { text: c.name })));
+  }
+  if (canNotice) {
+    panel.appendChild(h("label", { text: "群公告" }));
+    panel.appendChild(h("div", { class: "inline-form" },
+      h("input", { id: "gp-notice", placeholder: "填写群公告", value: c.notice || "" }),
+      h("button", { class: "small", onclick: editNotice, text: "发布" })));
+  } else if (c.notice) {
+    panel.appendChild(h("div", { class: "kv" }, h("span", { text: "群公告" }), h("span", { text: c.notice })));
+  }
+
+  panel.appendChild(h("div", { class: "section-title", text: "群成员" }));
+  const members = h("div", { id: "gp-members" });
+  panel.appendChild(members);
+  loadGroupInfo(c.id).then((g) => {
+    activateGroupMembers(members, g, c);
+  });
+
+  const ops = h("div", { class: "ops" });
+  ops.appendChild(h("button", { class: "small", onclick: () => inviteMembers(c), text: "邀请成员" }));
+  if (c.myRole === "OWNER" || c.myRole === "ADMIN") {
+    ops.appendChild(h("button", { class: "small", onclick: () => toggleMuteAll(!(c.muteAll || false)), text: c.muteAll ? "取消全员禁言" : "全员禁言" }));
+  }
+  if (c.myRole === "OWNER") {
+    ops.appendChild(h("button", { class: "small", onclick: () => transferOwner(c), text: "转让群主" }));
+    ops.appendChild(h("button", { class: "small danger", onclick: () => disbandGroup(c), text: "解散群" }));
+  }
+  if (c.myRole !== "OWNER") {
+    ops.appendChild(h("button", { class: "small danger", onclick: () => leaveGroup(c), text: "退出群聊" }));
+  }
+  ops.appendChild(h("button", { class: "small secondary", onclick: closePanel, text: "关闭" }));
+  panel.appendChild(ops);
+}
+
+function activateGroupMembers(members, g, c) {
+  members.replaceChildren();
+  const oid = g.ownerId;
+  for (const m of g.members || []) {
+    const roleTag = m.role === "OWNER" ? "群主" : m.role === "ADMIN" ? "管理员" : "";
+    const canManage = (c.myRole === "OWNER") || (c.myRole === "ADMIN" && m.role === "MEMBER");
+    members.appendChild(h("div", { class: "frow" },
+      avatarOf({ nickname: m.nickname, username: m.username }),
+      h("div", { class: "fname" },
+        h("div", { class: "n" }, m.nickname + (m.role === "OWNER" ? "（我）" : "")),
+        h("div", { class: "s", text: "微信号：@" + m.username + (roleTag ? " · " + roleTag : "") })),
+      canManage ? h("div", { class: "ops" },
+        h("button", { class: "small", onclick: () => muteMember(m.user_id), text: "禁言" }),
+        c.myRole === "OWNER" ? h("button", { class: "small secondary", onclick: () => setAdmin(m.user_id, m.role !== "ADMIN"), text: m.role === "ADMIN" ? "取消管理" : "设管理" }) : "",
+        h("button", { class: "small danger", onclick: () => kickUser(m.user_id), text: "移除" })) : ""));
+  }
+}
+
+async function renameGroup() {
+  const name = document.getElementById("gp-name").value.trim();
+  if (!name) return toast("群名不能为空", false);
+  try {
+    await post(`/group/${S.active.id}/rename`, { name });
+    toast("群名已更新");
+    S.active.name = name;
+    await refreshConversations();
+    render();
+  } catch (e) { toast(e.message, false); }
+}
+async function editNotice() {
+  const notice = document.getElementById("gp-notice").value.trim();
+  try {
+    await post(`/group/${S.active.id}/notice`, { notice });
+    toast("群公告已发布");
+    S.active.notice = notice;
+    await refreshConversations();
+    render();
+  } catch (e) { toast(e.message, false); }
 }
 
 function myRole(r) {
@@ -532,15 +641,6 @@ function myRole(r) {
 }
 async function loadGroupInfo(convId) {
   return await get(`/group/${convId}`);
-}
-function appendOpsGroup(ops, c) {
-  ops.appendChild(h("button", { class: "small", onclick: () => inviteMembers(c), text: "邀请成员" }));
-  if (c.myRole === "OWNER") {
-    ops.appendChild(h("button", { class: "small", onclick: () => toggleMuteAll(true), text: "全员禁言" }));
-    ops.appendChild(h("button", { class: "small", onclick: () => transferOwner(c), text: "转让群主" }));
-    ops.appendChild(h("button", { class: "small danger", onclick: () => disbandGroup(c), text: "解散群" }));
-  }
-  ops.appendChild(h("button", { class: "small secondary", onclick: () => leaveGroup(c), text: "退出群聊" }));
 }
 async function inviteMembers(c) {
   const box = h("div", { class: "panel" }, h("h3", { text: "邀请成员" }),
@@ -700,7 +800,6 @@ function timeStr(ts) {
   if (!ts) return "";
   return new Date(ts).toLocaleString("zh-CN");
 }
-function dispatch(fn) { setTimeout(fn, 0); }
 
 // ============ 启动 ============
 if (isLoggedIn()) {
