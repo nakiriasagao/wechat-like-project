@@ -59,7 +59,7 @@ npx tsx src/smoke.ts      # 终端 B（在 server/ 目录，BASE 默认 localhos
 server/src/index.ts        # 入口：migrate() 后 buildApp().listen()
 server/src/app.ts          # 全部路由集中在此，按模块挂 requireAuth/guard/guardGroup
 server/src/middleware/     # auth(JWT+禁用校验) / guard(权限) / error(AppError->JSON)
-server/src/db/             # database(SQLite+tx) / migrate(全部建表) / seed
+server/src/db/             # database(SQLite+tx) / migrate(idempotent建表，boot时执行) / seed
 server/src/modules/{auth,friend,conversation,message,group,report,admin}/controller.ts
 shared/src/                # 根级独立 workspace，被 server 以 "shared" 导入
   role.ts  report.ts  error.ts(BizCode)  permissions.ts(矩阵)  AppError.ts
@@ -67,8 +67,10 @@ web/    index.html + src/{api,app}.js + style.css   # 用户端 SPA（vanilla-JS
 admin/  index.html + src/{api,app}.js + style.css   # 管理后台 SPA（vanilla-JS，server.mjs 静态托管）
 ```
 
+- **无迁移框架**：schema 只在本项目 `server/src/db/migrate.ts`（idempotent `CREATE TABLE IF NOT EXISTS`），`index.ts` 里 `migrate()` 在启动时执行，不删表。加新表就改 `migrate.ts`；给已有表**加列**是 `IF NOT EXISTS` 不生效的，需 `ALTER TABLE` 或直接删 `data/*.sqlite`。
 - 无 `src/common/`（守卫在 `src/middleware/`），shared 不是 `src/shared/` 而是根级 workspace——写路径、找枚举时别按 AGENTS 旧稿的目录走。
-- 路由/守卫约定：全局动作 `guard(action)`，群内动作 `guardGroup(action)`；参数取 `params.convId → body.convId → query.convId`。
+- 路由/守卫约定：全局动作 `guard(action)`，群内动作 `guardGroup(action)`；`convId` 取 `params.convId → params.id → body.convId → query.convId`（见 `guard.ts` 的 `readConvId`，仅 `guardGroup` 解析并写入 `req.convId`）。
+- 还有 `server/src/utils/helpers.ts`（`getConversation`/`getMember`/`assertCanSpeakInGroup`），被各 controller 复用。
 - 业务错误：抛 `AppError`（`shared/src/AppError.ts`），code => HTTP 状态映射在 `shared/src/error.ts`（100xx→401、2xxxx→400、3xxxx→404、403xx→403）。
 
 ## 状态机（见 `shared/src/report.ts`）

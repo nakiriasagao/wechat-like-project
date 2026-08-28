@@ -90,7 +90,7 @@ const NAV = () => [
 function render() {
   if (!isLoggedIn()) return renderLogin();
   const nav = h("div", { class: "nav" },
-    h("div", { class: "brand", text: "微信管理后台" }),
+    h("div", { class: "brand" }, h("span", { class: "dot" }), "微信管理后台"),
     ...NAV().map((n) => h("div", { class: `item ${S.view === n.key ? "active" : ""}`, onclick: () => { S.view = n.key; render(); }, text: n.label })),
     h("div", { class: "spacer" }),
     h("div", { class: "who", text: `${roleLabel(S.me.role)} · ${S.me.username}` }),
@@ -127,6 +127,16 @@ function statusBadge(s) {
 }
 const targetLabel = (t) => ({ MESSAGE: "消息", USER: "用户", GROUP: "群" }[t] || t);
 const catLabel = (c) => ({ HARASSMENT: "骚扰", AD: "广告", ILLEGAL: "违法", PORNOGRAPHY: "涉黄", FRAUD: "诈骗", OTHER: "其他" }[c] || c);
+// 处罚动作与举报目标类型的合法组合（与后端 ACTIONS_BY_TARGET 保持一致）
+const PUNISH_LABEL = {
+  MUTE_1D: "禁言 1 天", MUTE_7D: "禁言 7 天", MUTE_30D: "禁言 30 天", BAN_ACCOUNT: "封禁账号",
+  FREEZE_GROUP: "冻结群", DISBAND_GROUP: "解散群", DELETE_MESSAGE: "删除消息", KICK_MEMBER: "移出成员",
+};
+const ACTIONS_BY_TARGET = {
+  USER: ["BAN_ACCOUNT", "MUTE_1D", "MUTE_7D", "MUTE_30D", "KICK_MEMBER"],
+  GROUP: ["FREEZE_GROUP", "DISBAND_GROUP"],
+  MESSAGE: ["DELETE_MESSAGE"],
+};
 
 function reportRow(r, detailOnly) {
   const ops = h("div", { class: "ops" });
@@ -166,19 +176,13 @@ async function doEscalate(r) {
 }
 
 function openPunish(r) {
+  const actions = ACTIONS_BY_TARGET[r.targetType] || [];
+  const opts = actions.map((a) => h("option", { value: a, text: PUNISH_LABEL[a] }));
   const box = h("div", { class: "panel-overlay" }, h("div", { class: "panel" },
     h("h3", { text: `举报 #${r.id} · 终裁处罚` }),
     h("div", { class: "note", text: `目标: ${targetLabel(r.targetType)} #${r.targetId}` }),
     h("label", { text: "处罚动作" }),
-    h("select", { id: "p-action" },
-      h("option", { value: "MUTE_1D", text: "禁言 1 天" }),
-      h("option", { value: "MUTE_7D", text: "禁言 7 天" }),
-      h("option", { value: "MUTE_30D", text: "禁言 30 天" }),
-      h("option", { value: "BAN_ACCOUNT", text: "封禁账号" }),
-      h("option", { value: "FREEZE_GROUP", text: "冻结群" }),
-      h("option", { value: "DISBAND_GROUP", text: "解散群" }),
-      h("option", { value: "DELETE_MESSAGE", text: "删除消息" }),
-      h("option", { value: "KICK_MEMBER", text: "踢出成员" })),
+    h("select", { id: "p-action" }, ...opts),
     h("label", { text: "处理说明" }), h("input", { id: "p-detail", placeholder: "填写处罚依据" }),
     h("div", { class: "ops" },
       h("button", { onclick: submitPunish, text: "确认处罚" }),

@@ -11,6 +11,7 @@ export function migrate() {
       nickname      TEXT NOT NULL,
       role          TEXT NOT NULL DEFAULT 'USER',
       status        TEXT NOT NULL DEFAULT 'ACTIVE',
+      wechat_id     TEXT UNIQUE,           -- 微信号（可自定义，默认取 username）
       mute_until    INTEGER,
       created_at    INTEGER NOT NULL
     );
@@ -111,6 +112,10 @@ export function migrate() {
   // 为已存在的旧库补充字段（SQLite 无 ADD COLUMN IF NOT EXISTS，用 try/catch 幂等）：
   try { db.exec("ALTER TABLE friendships ADD COLUMN message TEXT"); } catch { /* 已存在 */ }
   try { db.exec("ALTER TABLE conversations ADD COLUMN avatar TEXT"); } catch { /* 已存在 */ }
+  try { db.exec("ALTER TABLE users ADD COLUMN wechat_id TEXT"); } catch { /* 已存在 */ }
+  // 回填微信号：空则取 username（username 唯一，故微信号也唯一）
+  db.exec("UPDATE users SET wechat_id = username WHERE wechat_id IS NULL OR wechat_id = ''");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_wechat ON users(wechat_id)");
 }
 
 /** 最近一次本地迁移版本号（预留，当前单版本） */

@@ -28,6 +28,7 @@ export function listConversations(req: Request, res: Response) {
       id: r.id,
       type: r.type,
       name: r.type === "DIRECT" ? directPartnerName(r.id, userId) : r.name,
+      partnerId: r.type === "DIRECT" ? directPartnerId(r.id, userId) : null,
       status: r.status,
       notice: r.notice,
       pin: !!r.pin,
@@ -46,6 +47,13 @@ function directPartnerName(convId: number, userId: number) {
     .prepare("SELECT u.nickname, u.username FROM conversation_members cm JOIN users u ON u.id = cm.user_id WHERE cm.conversation_id = ? AND cm.user_id != ? LIMIT 1")
     .get(convId, userId) as any;
   return p ? p.nickname : "单聊";
+}
+
+function directPartnerId(convId: number, userId: number) {
+  const p = getDb()
+    .prepare("SELECT user_id FROM conversation_members WHERE conversation_id = ? AND user_id != ? LIMIT 1")
+    .get(convId, userId) as any;
+  return p ? p.user_id : null;
 }
 
 /** 创建群聊 */

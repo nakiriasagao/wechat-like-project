@@ -48,6 +48,7 @@ export function kick(req: Request, res: Response) {
   const targetMember = db.prepare("SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?").get(convId, target) as any;
   if (!targetMember) throw AppError.bad(BizCode.INVALID_INPUT, "目标不在群内");
   if (target === conv.owner_id) throw AppError.forbidden(BizCode.FORBIDDEN, "不能踢出群主");
+  if (target === req.user!.id) throw AppError.bad(BizCode.INVALID_INPUT, "不能移除自己");
 
   // 群管理员不可踢其他管理员/群主
   if (req.user!.role === "USER" && req.groupRole === GroupRole.ADMIN && targetMember.role !== GroupRole.MEMBER)
@@ -61,11 +62,14 @@ export function kick(req: Request, res: Response) {
 export function muteMember(req: Request, res: Response) {
   const convId = req.convId!;
   const target = Number(req.body?.userId);
-  const until = Number(req.body?.until) ?? 0; // time, 0=解禁
+  const until = Number(req.body?.until) || 0; // time, 0=解禁（NaN/缺省亦视为解禁）
   const db = getDb();
   if (target === req.user!.id) throw AppError.bad(BizCode.INVALID_INPUT, "不能禁言自己");
   const tm = db.prepare("SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?").get(convId, target) as any;
   if (!tm) throw AppError.bad(BizCode.INVALID_INPUT, "目标不在群内");
+  // 群管理员不能对其他管理员/群主禁言（群主可禁言包括管理员）
+  if (req.user!.role === "USER" && req.groupRole === GroupRole.ADMIN && tm.role !== GroupRole.MEMBER)
+    throw AppError.forbidden(BizCode.FORBIDDEN, "管理员只能禁言普通成员");
 
   db.prepare("UPDATE conversation_members SET muted_until = ? WHERE conversation_id = ? AND user_id = ?").run(until || null, convId, target);
   res.json({ message: until ? "已禁言" : "已解除禁言" });
@@ -87,6 +91,7 @@ export function transferOwner(req: Request, res: Response) {
   tx(() => {
     const tm = db.prepare("SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?").get(convId, target) as any;
     if (!tm) throw AppError.bad(BizCode.INVALID_INPUT, "目标不在群内");
+    if (target === req.user!.id) throw AppError.bad(BizCode.INVALID_INPUT, "不能转让给自己");
     db.prepare("UPDATE conversation_members SET role='OWNER' WHERE conversation_id = ? AND user_id = ?").run(convId, target);
     db.prepare("UPDATE conversation_members SET role='MEMBER' WHERE conversation_id = ? AND user_id = ?").run(convId, req.user!.id);
     db.prepare("UPDATE conversations SET owner_id = ? WHERE id = ?").run(target, convId);
@@ -102,6 +107,8 @@ export function setAdmin(req: Request, res: Response) {
   const db = getDb();
   const tm = db.prepare("SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?").get(convId, target) as any;
   if (!tm) throw AppError.bad(BizCode.INVALID_INPUT, "目标不在群内");
+  if (target === req.user!.id) throw AppError.bad(BizCode.INVALID_INPUT, "不能修改自己的角色");
+  if (tm.role === GroupRole.OWNER) throw AppError.forbidden(BizCode.FORBIDDEN, "不能修改群主角色");
   db.prepare("UPDATE conversation_members SET role = ? WHERE conversation_id = ? AND user_id = ?").run(isAdmin, convId, target);
   res.json({ message: isAdmin === GroupRole.ADMIN ? "已设为管理员" : "已取消管理员" });
 }

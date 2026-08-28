@@ -23,6 +23,7 @@ export function buildApp() {
   api.post("/auth/register", auth.register);
   api.post("/auth/login", auth.login);
   api.get("/auth/me", requireAuth, auth.me);
+  api.post("/users/wechat", requireAuth, auth.updateWechat);
 
   // 好友
   api.get("/friends/search", requireAuth, friend.search);

@@ -129,6 +129,15 @@ export function punish(req: Request, res: Response) {
   const VALID_ACTIONS: PunishAction[] = Object.values(PunishAction);
   if (!VALID_ACTIONS.includes(action)) throw AppError.bad(BizCode.INVALID_INPUT, "非法处罚动作");
 
+  // 处罚动作必须与举报目标类型匹配，否则会误伤（如对消息启用封禁账号）
+  const ACTIONS_BY_TARGET: Record<string, PunishAction[]> = {
+    USER: [PunishAction.BAN_ACCOUNT, PunishAction.MUTE_1D, PunishAction.MUTE_7D, PunishAction.MUTE_30D, PunishAction.KICK_MEMBER],
+    GROUP: [PunishAction.FREEZE_GROUP, PunishAction.DISBAND_GROUP],
+    MESSAGE: [PunishAction.DELETE_MESSAGE],
+  };
+  if (!(ACTIONS_BY_TARGET[report.target_type] ?? []).includes(action))
+    throw AppError.bad(BizCode.INVALID_INPUT, `处罚动作与举报目标不匹配: ${action} 不可用于 ${report.target_type}`);
+
   switch (action) {
     case PunishAction.BAN_ACCOUNT: applyBan(report.target_id); break;
     case PunishAction.MUTE_1D:
@@ -184,6 +193,9 @@ export function createAppeal(req: Request, res: Response) {
   const report = getReport(reportId);
   if (report.status !== ReportStatus.PUNISHED)
     throw AppError.conflict(BizCode.STATE_CONFLICT, "仅处于已处罚状态可申诉");
+  // 仅被处罚方（举报目标）可申诉，防止他人替申诉
+  if (!isReportTarget(report, req.user!.id))
+    throw AppError.forbidden(BizCode.FORBIDDEN, "仅举报目标可发起申诉");
   db.prepare("INSERT INTO appeals (report_id, appealer_id, reason, status, created_at, updated_at) VALUES (?, ?, ?, 'PENDING', ?, ?)")
     .run(reportId, req.user!.id, reason, now(), now());
   const r = transition(report, ReportStatus.APPEALING, req.user!.id, "APPEAL", reason);
@@ -237,6 +249,21 @@ function getReport(reportId: number) {
   const report = getDb().prepare("SELECT * FROM reports WHERE id = ?").get(reportId) as any;
   if (!report) throw AppError.notFound(BizCode.REPORT_NOT_FOUND, "举报工单不存在");
   return report;
+}
+
+/** 是否为举报目标的当事人（诉求申诉权限的依据） */
+function isReportTarget(report: any, userId: number): boolean {
+  const db = getDb();
+  if (report.target_type === ReportTargetType.USER) return Number(report.target_id) === userId;
+  if (report.target_type === ReportTargetType.MESSAGE) {
+    const m = db.prepare("SELECT sender_id FROM messages WHERE id = ?").get(report.target_id) as any;
+    return m?.sender_id === userId;
+  }
+  if (report.target_type === ReportTargetType.GROUP) {
+    const g = db.prepare("SELECT owner_id FROM conversations WHERE id = ?").get(report.target_id) as any;
+    return g?.owner_id === userId;
+  }
+  return false;
 }
 
 /** 事件审计日志 */

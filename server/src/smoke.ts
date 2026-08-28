@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_FILE = process.env.DB_FILE ?? path.resolve(__dirname, "../../../data/wechat.sqlite");
+const DB_FILE = process.env.DB_FILE ?? path.resolve(__dirname, "../../data/wechat.sqlite");
 const BASE = process.env.BASE ?? "http://localhost:3000/api";
 let pass = 0, fail = 0;
 function ok(name: string, cond: boolean, extra = "") {

@@ -10,6 +10,7 @@ export interface AuthUser {
   nickname: string;
   role: Role;
   status: AccountStatus;
+  wechatId: string | null;
   muteUntil: number | null;
 }
 
@@ -53,7 +54,7 @@ export function requireAuth(req: Request, _res: Response, next: NextFunction) {
   }
 
   const row = getDb()
-    .prepare("SELECT id, username, nickname, role, status, mute_until as muteUntil FROM users WHERE id = ?")
+    .prepare("SELECT id, username, nickname, role, status, wechat_id as wechatId, mute_until as muteUntil FROM users WHERE id = ?")
     .get(payload.id) as any;
 
   if (!row) return next(AppError.unauthorized(BizCode.UNAUTHENTICATED, "账号不存在"));

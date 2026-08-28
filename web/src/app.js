@@ -3,7 +3,7 @@ import { api, get, post, del, setToken, setUser, currentUser, isLoggedIn } from 
 const $app = document.getElementById("app");
 const $toast = document.getElementById("toast");
 
-// DOM 构建辅助
+// ---------- DOM 辅助 ----------
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -11,12 +11,14 @@ function h(tag, attrs = {}, ...children) {
     else if (k === "onclick") el.onclick = v;
     else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
     else if (v === true) el.setAttribute(k, "");
+    else if (v === false || v == null) continue;
     else if (k === "text") el.textContent = v;
     else if (k === "html") el.innerHTML = v;
+    else if (k === "value") el.value = v;
     else el.setAttribute(k, v);
   }
   for (const c of children.flat()) {
-    if (c == null || c === false) continue;
+    if (c == null || c === false || c === "") continue;
     el.append(c.nodeType ? c : document.createTextNode(String(c)));
   }
   return el;
@@ -24,8 +26,11 @@ function h(tag, attrs = {}, ...children) {
 function toast(msg, ok = true) {
   $toast.textContent = msg;
   $toast.classList.add("show");
-  $toast.style.background = ok ? "rgba(0,0,0,.8)" : "#fa5151";
+  $toast.style.background = ok ? "rgba(0,0,0,.78)" : "#fa5151";
   setTimeout(() => $toast.classList.remove("show"), 2200);
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 function roleLabel(r) {
   return { USER: "用户", CUSTOMER_SERVICE: "客服", PLATFORM_ADMIN: "管理员", SUPER_ADMIN: "超管" }[r] || r;
@@ -34,39 +39,46 @@ function avatarOf(u, cls = "") {
   const bg = u.role === "PLATFORM_ADMIN" || u.role === "SUPER_ADMIN" ? "admin" : u.role === "CUSTOMER_SERVICE" ? "service" : "";
   return h("div", { class: `avatar ${bg} ${cls}` }, (u.nickname || u.username || "?").slice(0, 1));
 }
+function timeStr(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  if (sameDay) return d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+}
 
-// ============ 全局状态 ============
+// ---------- 全局状态 ----------
 const S = {
   me: currentUser(),
+  nav: "chats", // chats | contacts
   convs: [],
-  active: null, // active conversation
+  active: null,
   msgs: [],
   friends: [],
   blacklist: [],
   requests: { incoming: [], outgoing: [] },
-  group: null,
+  conv: null,
   searchQ: "",
-  tab: "chats", // chats | friends
   timer: null,
 };
 
-// ============ 登录 ============
+// ---------- 登录 ----------
 function renderLogin() {
   $app.replaceChildren(
     h("div", { class: "login-wrap" },
       h("div", { class: "login-box" },
-        h("h1", { text: "微信 · 用户端" }),
+        h("div", { class: "logo", text: "微" }),
+        h("h1", { text: "微信" }),
         h("div", { class: "sub", text: "登录或注册账号" }),
-        h("div", { class: "row" }, h("input", { id: "lg-user", placeholder: "用户名" })),
+        h("div", { class: "row" }, h("input", { id: "lg-user", placeholder: "用户名 / 微信号" })),
         h("div", { class: "row" }, h("input", { id: "lg-pass", type: "password", placeholder: "密码" })),
-        h("div", { class: "row", id: "lg-nickwrap", style: "display:none" },
-          h("input", { id: "lg-nick", placeholder: "昵称" })),
+        h("div", { class: "row", id: "lg-nickwrap", style: "display:none" }, h("input", { id: "lg-nick", placeholder: "昵称（注册）" })),
         h("div", { class: "actions" },
           h("button", { id: "lg-submit", text: "登录" }),
           h("button", { class: "secondary", id: "lg-toggle", text: "注册" })),
-        h("div", { class: "hint", style: "margin-top:12px" },
-          h("div", { text: "演示账号：user1 / user2 / user3 / service / admin / superadmin，密码 password" }))
-      )));
+        h("div", { class: "hint" },
+          h("div", { text: "演示账号：user1 / user2 / user3 / service / admin / superadmin，密码均 password" })))));
   let mode = "login";
   const toggle = () => {
     mode = mode === "login" ? "register" : "login";
@@ -94,18 +106,21 @@ function renderLogin() {
   };
 }
 
-// ============ 主界面 ============
-function bootstrap() {
+// ---------- 启动 / 轮询 ----------
+async function bootstrap() {
   startPolling();
+  try { await refreshConversations(); } catch (e) {}
   render();
 }
-
 function startPolling() {
   stopPolling();
   S.timer = setInterval(async () => {
-    try {
-      await refreshConversations();
-    } catch (e) {}
+    try { await refreshConversations(); } catch (e) {}
+    if (S.nav === "chats") {
+      const pl = document.getElementById("panel-list");
+      if (pl && !S.searchQ.trim()) renderSidebarContent();
+    }
+    try { await syncActiveMessages(); } catch (e) {}
   }, 5000);
 }
 function stopPolling() {
@@ -117,223 +132,348 @@ function logout() {
   stopPolling();
   renderLogin();
 }
-
+function doLogout() {
+  if (!confirm("确定退出登录？")) return;
+  closePanel();
+  logout();
+}
 async function refreshConversations(keepActive = true) {
   const res = await get("/conversations");
   S.convs = res.items || [];
   if (keepActive && S.active) {
     const found = S.convs.find((c) => c.id === S.active.id);
     if (found) S.active = found;
-    else { S.active = null; S.msgs = []; }
+    else { S.active = null; S.msgs = []; S.conv = null; }
   }
 }
 
+// ================= 主渲染 =================
 function render() {
   if (!isLoggedIn()) return renderLogin();
-  const top = h("div", { class: "topbar" },
-    h("div", { class: "title" }, S.active ? convTitle(S.active) : "微信"),
-    h("div", { style: "display:flex;gap:8px" },
-      h("button", { class: "secondary small", onclick: openCreateGroup, text: "发起群聊" }),
-      h("button", { class: "secondary small", onclick: openReports, text: "我的举报" }),
-      h("button", { class: "danger small", onclick: logout, text: "退出" })));
-
-  const content = S.active
-    ? h("div", { class: "chat", id: "chatbox" })
-    : h("div", { class: "empty", text: S.tab === "chats" ? "选择一个会话开始聊天" : "管理你的好友" });
-  if (!S.active) renderHomePanel(content);
-
-  const app = h("div", { class: "app" },
-    h("div", { class: "sidebar" },
-      h("div", { class: "me" },
-        avatarOf(S.me, "lg"),
-        h("div", { class: "info" },
-          h("div", { class: "name", text: S.me.nickname || S.me.username }),
-          h("div", { class: "role", text: `${roleLabel(S.me.role)} · ${S.me.username}` })),
-        h("button", { class: "small", onclick: logout, text: "退出" })),
-      h("div", { class: "tabs" },
-        h("div", { class: `tab ${S.tab === "chats" ? "active" : ""}`, onclick: () => switchTab("chats"), text: "聊天" }),
-        h("div", { class: `tab ${S.tab === "friends" ? "active" : ""}`, onclick: () => switchTab("friends"), text: "通讯录" })),
-      h("div", { class: "search" }, h("input", { placeholder: "搜索用户 / 群...", oninput: (e) => { S.searchQ = e.target.value; render(); } })),
-      h("div", { class: "list", id: "list" })),
-    h("div", { class: "main" }, top, content));
-
-  if (S.active) {
-    renderMessages();
-  } else {
-    renderList();
-  }
-  $app.replaceChildren(app);
+  const nav = renderNav();
+  const sidebar = renderSidebar();
+  const main = renderMain();
+  $app.replaceChildren(h("div", { class: "wx-app" }, nav, sidebar, main));
+  // render() 重建 DOM 后会生成空的 #panel-list，必须立即填充侧边栏，
+  // 否则会等到下一次 5s 轮询才刷新（表现为左侧聊天栏短暂消失再现）。
+  renderSidebarContent();
 }
 
-function switchTab(tab) {
-  S.tab = tab;
-  render();
+function renderNav() {
+  const icons = {
+    chats: { label: "聊天", svg: chatSvg() },
+    contacts: { label: "通讯录", svg: contactSvg() },
+  };
+  const items = Object.entries(icons).map(([key, it]) =>
+    h("div", { class: `rail-item ${S.nav === key ? "active" : ""}`, onclick: () => { S.nav = key; S.searchQ = ""; S.active = null; render(); } },
+      h("div", { class: "rail-ico", html: it.svg }),
+      h("div", { class: "rail-label", text: it.label })));
+  return h("div", { class: "rail" },
+    h("div", { class: "rail-icons" }, ...items),
+    h("div", { class: "rail-avatar", onclick: openProfile }, avatarOf(S.me, "lg")),
+    h("div", { class: "rail-settings", title: "个人信息", onclick: openProfile, html: gearSvg() }));
 }
 
-function convTitle(c) {
-  if (c.type === "GROUP") return c.name + "  群";
-  return c.name || "单聊";
+// ================= 中间列 =================
+function renderSidebar() {
+  const search = h("div", { class: "search" },
+    h("span", { class: "search-ico", html: searchSvg() }),
+    h("input", { id: "search-input", placeholder: S.nav === "contacts" ? "搜索朋友" : "搜索", value: S.searchQ || "", oninput: (e) => { S.searchQ = e.target.value; renderSidebarContent(); } }));
+  const extra = h("div", { class: "sidebar-extra" },
+    h("div", { class: "icon-btn", title: "添加好友", onclick: openAddFriendPage, html: plusSvg() }),
+    h("div", { class: "icon-btn", title: "发起群聊", onclick: openCreateGroup, html: groupSvg() }),
+    h("div", { class: "icon-btn", title: "我的举报", onclick: openReports, html: flagSvg() }));
+  return h("div", { class: "sidebar" },
+    h("div", { class: "sidebar-head" }, search, extra),
+    h("div", { class: "panel-list", id: "panel-list" }));
 }
-
-function renderHomePanel(content) {
-  content.textContent = "";
-  content.appendChild(S.tab === "friends" ? friendsPanel() : emptyHint());
-}
-function emptyHint() {
-  return h("div", { class: "empty", text: S.tab === "chats" ? "搜索用户可直接发起会话；从好友列表或创建群聊开始" : "" });
-}
-
-function renderHomeList() {
-  if (S.tab === "friends") renderFriendsList();
-  else renderConvList();
-}
-
-// ============ 会话列表 ============
-function renderList() {
-  const list = document.getElementById("list");
+function renderSidebarContent() {
+  const list = document.getElementById("panel-list");
   if (!list) return;
   list.replaceChildren();
-  if (S.tab === "friends") {
-    renderFriendsList(list);
+  const q = S.searchQ.trim();
+  if (S.nav === "contacts") {
+    renderContactsList(list, q);
+  } else if (q) {
+    renderUserSearch(list, q);
+  } else {
+    renderConversationList(list);
+  }
+}
+
+// ----- 会话列表 -----
+function renderConversationList(list) {
+  if (!S.convs.length) {
+    list.appendChild(h("div", { class: "empty", text: "暂无会话。搜索用户开始聊天，或发起群聊。" }));
     return;
   }
-  const q = S.searchQ.trim().toLowerCase();
-  const convs = q && S.active
-    ? S.convs.filter((c) => (c.name || "").toLowerCase().includes(q))
-    : S.convs;
-  if (!convs.length) {
-    list.appendChild(h("div", { class: "empty", text: "暂无会话。搜索用户、接受好友申请或发起群聊。" }));
-    return;
-  }
-  for (const c of convs) {
-    list.appendChild(convRow(c));
-  }
+  for (const c of S.convs) list.appendChild(convRow(c));
 }
 
 function convRow(c) {
   const last = c.lastMessage;
-  const prev = last
-    ? `${last.senderId === S.me.id ? "我：" : ""}${(last.content || "").slice(0, 40)}`
-    : c.type === "GROUP" ? (c.notice || "暂无消息") : "暂无消息";
+  let prev = "暂无消息";
+  if (last) {
+    const raw = (last.content || "").replace(/\n/g, " ");
+    prev = `${last.senderId === S.me.id ? "我：" : ""}${raw.slice(0, 40)}`;
+  } else if (c.type === "GROUP") {
+    prev = c.notice || "暂无消息";
+  }
   const title = c.type === "GROUP" ? c.name : c.name || "单聊";
   return h("div", { class: `conv ${S.active && S.active.id === c.id ? "active" : ""}`, onclick: () => selectConv(c) },
     avatarOf(c.type === "GROUP" ? { nickname: title.slice(0, 1) } : c, ""),
     h("div", { class: "cbody" },
       h("div", { class: "ctitle" },
-        h("span", { text: title }),
-        c.unread > 0 ? h("span", { class: "unread", text: c.unread }) : ""),
-      h("div", { class: "cprev", text: prev })));
+        h("span", { class: "t", text: title }),
+        !c.notify ? h("span", { class: "muted-tag", text: "免打扰" }) : "",
+        last ? h("span", { class: "time", text: timeStr(last.createdAt) }) : ""),
+      h("div", { class: "cprev", text: prev })),
+    c.unread > 0 ? h("span", { class: "unread", text: c.unread > 99 ? "99+" : c.unread }) : "");
 }
 
-// ============ 会话窗口 ============
+// ----- 搜索用户（可加好友 / 发消息）-----
+async function renderUserSearch(list, q) {
+  list.appendChild(h("div", { class: "group-label", text: `搜索 “${q}”` }));
+  let items = [];
+  try {
+    items = (await get(`/friends/search?q=${encodeURIComponent(q)}`)).items || [];
+  } catch (e) {
+    list.appendChild(h("div", { class: "empty", text: e.message }));
+    return;
+  }
+  if (!items.length) {
+    list.appendChild(h("div", { class: "empty", text: "没有找到相关用户" }));
+    return;
+  }
+  for (const u of items) list.appendChild(searchResultRow(u));
+}
+
+function relationAction(u) {
+  switch (u.relation) {
+    case "PENDING": return h("span", { class: "muted-text", text: "等待对方验证" });
+    case "REQUESTED": return h("button", { class: "small", onclick: () => acceptRequest(u.id), text: "同意" });
+    case "ACCEPTED": return h("button", { class: "small", onclick: () => openDirectById(u.id), text: "发消息" });
+    case "BLOCKED": return h("button", { class: "small secondary", onclick: () => unblockUser(u.id), text: "解除拉黑" });
+    case "BLOCKED_BY": return h("span", { class: "muted-text", text: "对方拉黑了你" });
+    default: return h("button", { class: "small", onclick: () => openAddFriend(u), text: "加好友" });
+  }
+}
+function searchResultRow(u) {
+  return h("div", { class: "frow" },
+    avatarOf(u),
+    h("div", { class: "fname" },
+      h("div", { class: "n", text: u.nickname }),
+      h("div", { class: "s", text: "微信号：" + (u.wechatId || u.username) })),
+    h("div", { class: "ops" }, relationAction(u)));
+}
+
+// ----- 通讯录 -----
+async function renderContactsList(list, q) {
+  list.appendChild(h("div", { class: "frow", onclick: openAddFriendPage },
+    h("div", { class: "avatar", style: "background:#e8e8e8;color:#6a6a6a" }, "＋"),
+    h("div", { class: "fname", style: "color:#191919" }, h("div", { class: "n", text: "添加朋友" }))));
+  try {
+    await loadFriends();
+  } catch (e) {
+    list.appendChild(h("div", { class: "empty", text: e.message }));
+    return;
+  }
+  const toLower = q.toLowerCase();
+  const matched = (f) => !q || f.nickname.toLowerCase().includes(toLower) || (f.username || "").toLowerCase().includes(toLower);
+
+  if (S.requests.incoming.length) {
+    list.appendChild(h("div", { class: "group-label", text: "好友申请" }));
+    for (const r of S.requests.incoming) {
+      list.appendChild(h("div", { class: "frow" },
+        avatarOf({ nickname: r.nickname, username: r.username }),
+        h("div", { class: "fname" },
+          h("div", { class: "n", text: r.nickname }),
+          h("div", { class: "s", text: "微信号：" + (r.wechatId || r.username) + (r.message ? " · 验证：" + r.message : "") })),
+        h("div", { class: "ops" },
+          h("button", { class: "small", onclick: () => acceptRequest(r.requester), text: "同意" }),
+          h("button", { class: "small danger", onclick: () => rejectRequest(r.requester), text: "拒绝" }))));
+    }
+  }
+  if (S.requests.outgoing.length) {
+    list.appendChild(h("div", { class: "group-label", text: "已发送申请" }));
+    for (const r of S.requests.outgoing) {
+      list.appendChild(h("div", { class: "frow" },
+        avatarOf({ nickname: r.nickname, username: r.username }),
+        h("div", { class: "fname" },
+          h("div", { class: "n", text: r.nickname }),
+          h("div", { class: "s", text: r.message ? "验证：" + r.message : "" })),
+        h("div", { class: "ops" }, h("span", { class: "muted-text", text: "等待确认" }))));
+    }
+  }
+  list.appendChild(h("div", { class: "group-label", text: `我的好友（${S.friends.length}）` }));
+  if (!S.friends.length) list.appendChild(h("div", { class: "empty", text: "还没有好友，搜一搜添加吧" }));
+  for (const f of S.friends) {
+    if (!matched(f)) continue;
+    const u = { nickname: f.nickname, username: f.username, ...f };
+    list.appendChild(h("div", { class: "frow", onclick: () => openDirectWith(f.userId) },
+      avatarOf(u),
+      h("div", { class: "fname" },
+        h("div", { class: "n", text: f.nickname }),
+        h("div", { class: "s", text: "微信号：" + (f.wechatId || f.username) })),
+      h("div", { class: "ops" },
+        h("button", { class: "small", onclick: (e) => { e.stopPropagation(); openDirectWith(f.userId); }, text: "发消息" }),
+        h("button", { class: "small secondary", onclick: (e) => { e.stopPropagation(); blockUser(f.userId); }, text: "拉黑" }),
+        h("button", { class: "small danger", onclick: (e) => { e.stopPropagation(); deleteFriend(f.userId); }, text: "删除" }))));
+  }
+  if (S.blacklist.length) {
+    list.appendChild(h("div", { class: "group-label", text: "黑名单" }));
+    for (const b of S.blacklist) {
+      list.appendChild(h("div", { class: "frow" },
+        avatarOf(b),
+        h("div", { class: "fname" },
+          h("div", { class: "n", text: b.nickname }),
+          h("div", { class: "s", text: "微信号：" + (b.wechatId || b.username) })),
+        h("div", { class: "ops" }, h("button", { class: "small secondary", onclick: () => unblockUser(b.userId), text: "解除拉黑" }))));
+    }
+  }
+}
+
+// ================= 右侧主区 =================
+function renderMain() {
+  if (S.active) return renderChat();
+  return h("div", { class: "main" },
+    h("div", { class: "chat-header" },
+      h("div", { class: "htitle", text: S.nav === "contacts" ? "通讯录" : "微信" }),
+      h("div", { class: "h-ops" })),
+    h("div", { class: "empty-wrap" },
+      h("div", { class: "wx-logo", html: wechatLogoSvg() }),
+      h("div", { class: "empty-tip", text: S.nav === "contacts" ? "从通讯录选择一个好友发起聊天" : "选择一个会话开始聊天" })));
+}
+
+function convTitle(c) {
+  if (c.type === "GROUP") return c.name + "";
+  return c.name || "单聊";
+}
+
+// ================= 聊天窗口 =================
+function renderChat() {
+  const c = S.active;
+  const canGroup = c.type === "GROUP";
+  const header = h("div", { class: "chat-header" },
+    h("div", { class: "htitle", onclick: openConvPanel, style: "cursor:pointer" },
+      h("span", { text: convTitle(c) }),
+      canGroup && c.notice ? h("span", { class: "mask", text: c.notice }) : ""),
+    h("div", { class: "h-ops" },
+      h("div", { class: "icon-btn", title: "聊天信息", onclick: openConvPanel, html: infoSvg() }),
+      h("div", { class: "icon-btn", title: "我的举报", onclick: openReports, html: flagSvg() })));
+
+  const body = h("div", { class: "chat-body", id: "chat-body" }, h("div", { class: "chat-inner", id: "chat-inner" }));
+
+  const composer = h("div", { class: "composer" },
+    h("div", { class: "composer-toolbar" },
+      h("div", { class: "tool", title: "表情", onclick: () => toggleEmoji(), html: emojiSvg() }),
+      h("div", { class: "tool", title: "图片 / 文件", onclick: () => document.getElementById("msg-input").focus(), html: photoSvg() })),
+    h("div", { class: "msg-type-row" },
+      h("select", { id: "msg-type" },
+        h("option", { value: "TEXT", text: "文字" }),
+        h("option", { value: "EMOTICON", text: "表情" }),
+        h("option", { value: "IMAGE", text: "图片" }),
+        h("option", { value: "FILE", text: "文件" }),
+        h("option", { value: "VOICE", text: "语音" }))),
+    h("div", { class: "composer-input" },
+      h("textarea", { id: "msg-input", placeholder: "", onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } } }),
+      h("button", { class: "send-btn", onclick: sendMessage, text: "发送" })));
+
+  const main = h("div", { class: "main" }, header, body, composer);
+
+  // 渲染消息
+  requestAnimationFrame(() => {
+    const inner = document.getElementById("chat-inner");
+    if (inner) renderMessages(inner);
+    const el = document.getElementById("chat-body");
+    if (el) el.scrollTop = el.scrollHeight;
+  });
+  return main;
+}
+
 async function selectConv(c) {
   S.active = c;
   S.active.id = Number(c.id);
-  await loadMessages();
+  S.nav = "chats";
+  S.searchQ = "";
+  try {
+    await loadMessages();
+  } catch (e) {
+    toast(e.message, false);
+  }
   render();
   markRead();
-  openChat();
 }
-function openChat() {
-  const chat = document.getElementById("chatbox");
-  if (!chat) return;
-  chat.replaceChildren();
-  chat.appendChild(h("div", { onclick: openConvPanel, id: "conv-banner" }));
-  const composer = h("div", { class: "composer" },
-    h("select", { id: "msg-type", style: "width:90px" },
-      h("option", { value: "TEXT", text: "文字" }),
-      h("option", { value: "EMOTICON", text: "表情" }),
-      h("option", { value: "IMAGE", text: "图片" }),
-      h("option", { value: "FILE", text: "文件" }),
-      h("option", { value: "VOICE", text: "语音" })),
-    h("input", { id: "msg-input", placeholder: "输入消息，Enter 发送" }),
-    h("button", { onclick: sendMessage, text: "发送" }));
-  chat.appendChild(composer);
-  document.getElementById("msg-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") sendMessage();
-  });
-  renderMessages();
-  chat.scrollTop = chat.scrollHeight;
-}
-
 async function loadMessages() {
   const res = await get(`/conversations/${S.active.id}/messages?limit=50`);
   S.msgs = res.items || [];
 }
+async function syncActiveMessages() {
+  const inner = document.getElementById("chat-inner");
+  if (!inner || !S.active) return;
+  const el = document.getElementById("chat-body");
+  const nearBottom = el && el.scrollHeight - el.scrollTop - el.clientHeight < 90;
+  try { await loadMessages(); } catch (e) { return; }
+  renderMessages(inner);
+  if (el && nearBottom) el.scrollTop = el.scrollHeight;
+}
 
-function renderMessages() {
-  const chat = document.getElementById("chatbox");
-  if (!chat) return;
-  const banner = document.getElementById("conv-banner");
-  if (banner) {
-    banner.className = "section-title";
-    banner.style.cursor = "pointer";
-    banner.textContent = S.active.type === "GROUP"
-      ? `${S.active.name}${S.active.notice ? " · " + S.active.notice : ""}`
-      : S.active.name || "单聊";
-    banner.onclick = openConvPanel;
+function renderMessages(inner) {
+  inner.replaceChildren();
+  if (!S.active) return;
+  if (S.active.type === "GROUP" && S.active.notice) {
+    inner.appendChild(h("div", { class: "conv-banner", onclick: openConvPanel, text: `群公告：${S.active.notice}` }));
   }
-  Array.from(chat.querySelectorAll(":scope > .msg, :scope > .system-msg, :scope > .time-chip")).forEach((el) => el.remove());
-  const composer = chat.querySelector(".composer");
   let lastTime = 0;
   for (const m of S.msgs) {
     if (m.createdAt - lastTime > 5 * 60 * 1000) {
-      const chip = h("div", { class: "time-chip", text: timeStr(m.createdAt) });
-      chat.insertBefore(chip, composer);
+      inner.appendChild(h("div", { class: "time-chip" }, h("span", { text: timeStr(m.createdAt) })));
     }
     lastTime = m.createdAt;
     if (m.recalled) {
-      const sys = h("div", { class: "system-msg", text: `${m.senderId === S.me.id ? "你" : (m.senderNickname || "对方")}撤回了一条消息` });
-      chat.insertBefore(sys, composer);
+      inner.appendChild(h("div", { class: "recall-tip", text: `${m.senderId === S.me.id ? "你" : (m.senderNickname || "对方")}撤回了一条消息` }));
       continue;
     }
-    const mine = m.senderId === S.me.id;
-    const mineDeleted = m.deletedBy && m.deletedBy.includes(S.me.id);
-    const bubble = h("div", { class: "bubble" });
-    if (mineDeleted) {
-      bubble.className = "bubble muted-text";
-      bubble.textContent = "（已删除）";
-    } else {
-      bubble.textContent = m.content || "";
-    }
-    // 群聊 & 他人消息：显示发送者昵称。自己的昵称用"我"
-    const name = mine ? "" : (S.active.type === "GROUP" ? (m.senderNickname || "成员") : "");
-    const body = h("div", { class: "mbody" },
-      name ? h("div", { class: "sender", text: name }) : "",
-      bubble,
-      h("div", { class: "meta" },
-        h("span", { text: timeStr(m.createdAt) }),
-        mine && !m.recalled ? h("button", { class: "small", text: "撤回", onclick: () => recallMessage(m) }) : "",
-        mine && !m.recalled ? h("button", { class: "small", text: "删除", onclick: () => deleteMessage(m) }) : "",
-        h("button", { class: "small", text: "举报", onclick: () => openReportMessage(m) })));
-    const av = avatarOf({ nickname: mine ? S.me.nickname : (m.senderNickname || "?") }, "");
-    const row = h("div", { class: `msg ${mine ? "mine" : ""}` }, av, body);
-    chat.insertBefore(row, composer);
+    inner.appendChild(messageRow(m));
   }
-  chat.scrollTop = chat.scrollHeight;
+}
+
+function messageRow(m) {
+  const mine = m.senderId === S.me.id;
+  const mineDeleted = m.deletedBy && m.deletedBy.includes(S.me.id);
+  const bubble = h("div", { class: `bubble${mineDeleted ? " deleted" : ""}` },
+    h("span", { class: "bubble-tail" }),
+    mineDeleted ? "已删除" : (m.content || ""));
+  const name = !mine && S.active.type === "GROUP" ? h("div", { class: "sender", text: m.senderNickname || "成员" }) : "";
+  const meta = h("div", { class: "meta" },
+    h("span", { text: timeStr(m.createdAt) }),
+    mine && !m.recalled ? h("span", { class: "mop", text: "撤回", onclick: () => recallMessage(m) }) : "",
+    mine && !m.recalled ? h("span", { class: "mop", text: "删除", onclick: () => deleteMessage(m) }) : "",
+    h("span", { class: "mop danger", text: "举报", onclick: () => openReport("MESSAGE", m.id, "举报这条消息") }));
+  const body = h("div", { class: "mbody" }, name, bubble, meta);
+  const av = avatarOf({ nickname: mine ? S.me.nickname : (m.senderNickname || "?") }, "");
+  return h("div", { class: `msg ${mine ? "mine" : ""}` }, av, body);
 }
 
 async function sendMessage() {
   const input = document.getElementById("msg-input");
   const type = document.getElementById("msg-type").value;
-  const content = input.value.trim();
+  const content = input.value.replace(/\n$/, "").trim();
   if (!content) return;
   try {
     await post("/messages", { convId: Number(S.active.id), type, content });
     input.value = "";
     await loadMessages();
-    renderMessages();
-    refreshConversations();
+    render();
   } catch (e) {
     toast(e.message, false);
   }
 }
-
 async function recallMessage(m) {
   try {
     await post("/messages/recall", { messageId: m.id });
     await loadMessages();
-    renderMessages();
+    render();
   } catch (e) {
     toast(e.message, false);
   }
@@ -342,121 +482,48 @@ async function deleteMessage(m) {
   try {
     await post("/messages/delete", { messageId: m.id });
     await loadMessages();
-    renderMessages();
+    render();
   } catch (e) {
     toast(e.message, false);
   }
 }
-
 function markRead() {
   if (!S.active) return;
   const maxMsg = S.msgs.length ? S.msgs[S.msgs.length - 1].id : 0;
   post("/messages/read", { convId: Number(S.active.id), lastReadMsgId: maxMsg }).catch(() => {});
 }
-
-// ============ 好友 ============
-function friendsPanel() {
-  const q = S.searchQ.trim();
-  return h("div", { class: "list" }, h("div", {
-    class: "empty",
-    html: q
-      ? `<button class="small" data-search>搜索用户 "${escapeHtml(q)}"</button>`
-      : "在上方搜索用户添加好友",
-  }), h("div", { id: "friends-content" }));
+function toggleEmoji() {
+  const input = document.getElementById("msg-input");
+  if (!input) return;
+  const box = emojiPanel();
+  input.focus();
+  box.addEventListener("click", (e) => {
+    if (e.target.dataset && e.target.dataset.em) {
+      input.value += e.target.dataset.em;
+      input.focus();
+    }
+  });
+  overlay(box, { panelOnly: true });
 }
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
 
+// ================= 好友 =================
 async function loadFriends() {
   const [fr, rq, bl] = await Promise.all([get("/friends"), get("/friends/requests"), get("/friends/blacklist")]);
   S.friends = fr.items || [];
   S.requests = rq || { incoming: [], outgoing: [] };
   S.blacklist = bl.items || [];
 }
-async function renderFriendsList(list) {
-  list.replaceChildren();
-  try {
-    await loadFriends();
-  } catch (e) {
-    list.appendChild(h("div", { class: "empty", text: e.message }));
-    return;
-  }
-  const q = S.searchQ.trim().toLowerCase();
-  if (q) {
-    const res = await get(`/friends/search?q=${encodeURIComponent(q)}`).catch(() => ({ items: [] }));
-    list.appendChild(h("div", { class: "section-title", text: "搜索结果" }));
-    for (const u of res.items || []) {
-      list.appendChild(h("div", { class: "frow" },
-        avatarOf(u),
-        h("div", { class: "fname" }, h("div", { class: "n", text: u.nickname }), h("div", { class: "s", text: "微信号：@" + u.username })),
-        h("div", { class: "ops" }, h("button", { class: "small", onclick: () => openAddFriend(u), text: "加好友" }))));
-    }
-    return;
-  }
-  // 收到的好友申请
-  if (S.requests.incoming.length) {
-    list.appendChild(h("div", { class: "section-title", text: "好友申请" }));
-    for (const r of S.requests.incoming) {
-      list.appendChild(h("div", { class: "frow" },
-        avatarOf({ nickname: r.nickname, username: r.username }),
-        h("div", { class: "fname" },
-          h("div", { class: "n", text: r.nickname }),
-          h("div", { class: "s", text: "微信号：@" + r.username }),
-          r.message ? h("div", { class: "msg-line", text: "验证消息：" + r.message }) : ""),
-        h("div", { class: "ops" },
-          h("button", { class: "small", onclick: () => acceptRequest(r.requester), text: "同意" }),
-          h("button", { class: "small danger", onclick: () => rejectRequest(r.requester), text: "拒绝" }))));
-    }
-  }
-  if (S.requests.outgoing.length) {
-    list.appendChild(h("div", { class: "section-title", text: "已发送申请" }));
-    for (const r of S.requests.outgoing) {
-      list.appendChild(h("div", { class: "frow" },
-        avatarOf({ nickname: r.nickname, username: r.username }),
-        h("div", { class: "fname" },
-          h("div", { class: "n", text: r.nickname }),
-          r.message ? h("div", { class: "msg-line", text: "验证消息：" + r.message }) : ""),
-        h("div", { class: "muted-text", text: "等待确认" })));
-    }
-  }
-  list.appendChild(h("div", { class: "section-title", text: "我的好友" }));
-  for (const f of S.friends) {
-    const u = { nickname: f.nickname, username: f.username, ...f };
-    list.appendChild(h("div", { class: "frow" },
-      avatarOf(u),
-      h("div", { class: "fname" }, h("div", { class: "n", text: f.nickname }), h("div", { class: "s", text: "微信号：@" + f.username })),
-      h("div", { class: "ops" },
-        h("button", { class: "small", onclick: () => openDirectWith(f.userId), text: "发消息" }),
-        h("button", { class: "small", onclick: () => blockUser(f.userId), text: "拉黑" }),
-        h("button", { class: "small danger", onclick: () => deleteFriend(f.userId), text: "删除" }))));
-  }
-  // 黑名单
-  if (S.blacklist.length) {
-    list.appendChild(h("div", { class: "section-title", text: "黑名单" }));
-    for (const b of S.blacklist) {
-      list.appendChild(h("div", { class: "frow" },
-        avatarOf(b),
-        h("div", { class: "fname" }, h("div", { class: "n", text: b.nickname }), h("div", { class: "s", text: "微信号：@" + b.username })),
-        h("div", { class: "ops" }, h("button", { class: "small secondary", onclick: () => unblockUser(b.userId), text: "解除拉黑" }))));
-    }
-  }
-  if (!S.friends.length && !S.requests.incoming.length && !S.requests.outgoing.length && !S.blacklist.length) {
-    list.appendChild(h("div", { class: "empty", text: "还没有好友，搜索用户名添加吧" }));
-  }
-}
 
-// 弹窗：填写验证消息再发送申请
 function openAddFriend(u) {
-  const box = h("div", { class: "panel-overlay" }, h("div", { class: "panel" },
+  const box = h("div", { class: "panel" },
     h("div", { class: "p-header" }, h("h3", { text: "添加好友" }), h("span", { class: "close", onclick: closePanel, text: "✕" })),
     h("label", { text: `你已找到：${u.nickname}（@${u.username}）` }),
     h("div", { class: "kv" }, h("span", { text: "验证消息" }), h("span", { text: "让对方确认" })),
     h("input", { id: "fr-message", placeholder: "例：我是张三", value: `我是 ${S.me.nickname || S.me.username}` }),
     h("div", { class: "ops" },
       h("button", { onclick: () => submitAddFriend(u.id), text: "发送申请" }),
-      h("button", { class: "secondary", onclick: closePanel, text: "取消" }))));
-  document.body.appendChild(box);
+      h("button", { class: "secondary", onclick: closePanel, text: "取消" })));
+  overlay(box);
 }
 async function submitAddFriend(userId) {
   const message = document.getElementById("fr-message").value.trim();
@@ -469,6 +536,42 @@ async function submitAddFriend(userId) {
     toast(e.message, false);
   }
 }
+
+function openAddFriendPage() {
+  const box = h("div", { class: "panel", style: "width:480px;max-width:92vw" },
+    h("div", { class: "p-header" }, h("h3", { text: "添加朋友" }), h("span", { class: "close", onclick: closePanel, text: "✕" })),
+    h("label", { text: "微信号 / 手机号" }),
+    h("div", { class: "inline-form" },
+      h("input", { id: "af-wechat", placeholder: "输入对方微信号，如 wx_user2", oninput: () => doWechatSearch(), onkeydown: (e) => { if (e.key === "Enter") doWechatSearch(); } }),
+      h("button", { onclick: () => doWechatSearch(), text: "搜索" })),
+    h("div", { class: "section-title", text: "搜索结果" }),
+    h("div", { id: "af-results", class: "af-results" }),
+    h("div", { class: "note", text: "敲下对方的微信号即可查找；对方同意后你们将成为好友。" }),
+    h("div", { class: "ops" }, h("button", { class: "secondary", onclick: closePanel, text: "关闭" })));
+  overlay(box);
+  const ib = document.getElementById("af-wechat");
+  if (ib) ib.focus();
+}
+async function doWechatSearch() {
+  const res = document.getElementById("af-results");
+  if (!res) return;
+  const q = document.getElementById("af-wechat").value.trim();
+  res.replaceChildren();
+  if (!q) { res.appendChild(h("div", { class: "muted-text", text: "请输入微信号搜索" })); return; }
+  let items = [];
+  try { items = (await get(`/friends/search?q=${encodeURIComponent(q)}`)).items || []; }
+  catch (e) { res.appendChild(h("div", { class: "empty", text: e.message })); return; }
+  if (!items.length) { res.appendChild(h("div", { class: "empty", text: "未找到该微信号对应的用户" })); return; }
+  for (const u of items) {
+    res.appendChild(h("div", { class: "frow" },
+      avatarOf(u),
+      h("div", { class: "fname" },
+        h("div", { class: "n", text: u.nickname }),
+        h("div", { class: "s", text: "微信号：" + (u.wechatId || u.username) })),
+      h("div", { class: "ops" }, relationAction(u))));
+  }
+}
+
 async function acceptRequest(userId) {
   try { await post("/friends/accept", { userId }); toast("已添加好友"); loadFriends().then(() => render()); } catch (e) { toast(e.message, false); }
 }
@@ -490,18 +593,23 @@ async function openDirectWith(userId) {
   await post("/friends/request", { userId }).catch(() => {});
   await post("/friends/accept", { userId }).catch(() => {});
   await refreshConversations();
-  const found = S.convs.find((x) => x.type === "DIRECT" && x.name !== S.me.nickname && x.name === S.friends.find((f) => f.userId === userId)?.nickname)
-    || S.convs.find((x) => x.type === "DIRECT");
-  if (found) selectConv(found);
+  const found = S.convs.find((x) => x.type === "DIRECT" && Number(x.partnerId) === Number(userId));
+  if (!found) { toast("请先互为好友", false); return; }
+  selectConv(found);
+}
+async function openDirectById(userId) {
+  const found = S.convs.find((x) => x.type === "DIRECT" && Number(x.partnerId) === Number(userId));
+  if (found) return selectConv(found);
+  await openDirectWith(userId);
 }
 
-// ============ 群 ============
+// ================= 群 =================
 function openCreateGroup() {
   const box = h("div", { class: "panel" },
-    h("h3", { text: "创建群聊" }),
+    h("div", { class: "p-header" }, h("h3", { text: "发起群聊" }), h("span", { class: "close", onclick: closePanel, text: "✕" })),
     h("label", { text: "群名" }), h("input", { id: "cg-name", placeholder: "群名" }),
-    h("div", { class: "section-title", text: "选择成员（有好友关系可拉入）" }),
-    h("div", { id: "cg-members", style: "max-height:180px;overflow-y:auto" }),
+    h("div", { class: "section-title", text: "选择成员（已有好友关系）" }),
+    h("div", { id: "cg-members", style: "max-height:200px;overflow-y:auto;border:1px solid #f0f0f0;border-radius:8px;padding:4px" }),
     h("div", { class: "ops" },
       h("button", { onclick: createGroup, text: "创建" }),
       h("button", { class: "secondary", onclick: closePanel, text: "取消" })));
@@ -509,10 +617,9 @@ function openCreateGroup() {
   const list = document.getElementById("cg-members");
   get("/friends").then((f) => {
     for (const m of f.items || []) {
-      const lab = h("label", { style: "display:flex;gap:8px;padding:4px 0" },
+      list.appendChild(h("label", { style: "display:flex;gap:8px;padding:6px 8px;cursor:pointer" },
         h("input", { type: "checkbox", class: "cg-friend", value: m.userId }),
-        h("span", { text: m.nickname }));
-      list.appendChild(lab);
+        h("span", { text: m.nickname })));
     }
   });
 }
@@ -534,27 +641,72 @@ async function createGroup() {
 function openConvPanel() {
   const c = S.active;
   if (!c) return;
-  const panel = h("div", { class: "panel" });
+  const panel = h("div", { class: "panel", style: "width:440px" });
   if (c.type === "GROUP") {
     addGroupSettings(panel, c);
   } else {
     panel.appendChild(h("div", { class: "p-header" }, h("h3", { text: c.name || "单聊" }), h("span", { class: "close", onclick: closePanel, text: "✕" })));
-    panel.appendChild(h("div", { class: "kv" }, h("span", { text: "会话类型" }), h("span", { text: "单聊" })));
-    const ops = h("div", { class: "ops" });
-    ops.appendChild(h("button", { class: "small danger", onclick: () => deleteFriend(Number(c.id)), text: "删除好友" }));
-    ops.appendChild(h("button", { class: "small secondary", onclick: closePanel, text: "关闭" }));
-    panel.appendChild(ops);
+    panel.appendChild(contactCard(panel, c, c.partnerId));
   }
+  addConvManagement(panel, c);
   overlay(panel);
 }
 
-// 群聊设置面板（微信风格：名称/公告/成员/管理）
+/** 会话级设置：置顶 + 消息免打扰（对齐微信电脑端） */
+function addConvManagement(panel, c) {
+  panel.appendChild(h("div", { class: "section-title", text: "会话设置" }));
+  const rows = h("div", { style: "display:flex;flex-direction:column;gap:8px" });
+  // 置顶
+  rows.appendChild(h("div", { class: "frow" },
+    h("span", { text: "置顶聊天" }),
+    h("div", { class: "ops" },
+      h("button", { class: `small ${c.pin ? "ok" : "secondary"}`, onclick: () => togglePin(c, !c.pin), text: c.pin ? "已置顶" : "置顶" }))));
+  // 免打扰
+  const muted = !c.notify;
+  rows.appendChild(h("div", { class: "frow" },
+    h("span", { text: "消息免打扰" }),
+    h("div", { class: "ops" },
+      h("button", { class: `small ${muted ? "ok" : "secondary"}`, onclick: () => toggleNotify(c, muted), text: muted ? "已开启" : "开启" }))));
+  panel.appendChild(rows);
+}
+async function togglePin(c, pin) {
+  try {
+    await post("/conversations/pin", { convId: Number(c.id), pin });
+    toast(pin ? "已置顶" : "已取消置顶");
+    await refreshConversations();
+    render();
+  } catch (e) { toast(e.message, false); }
+}
+async function toggleNotify(c, mute) {
+  try {
+    await post("/conversations/notify", { convId: Number(c.id), notify: !mute });
+    toast(mute ? "已开启免打扰" : "已关闭免打扰");
+    if (S.active && Number(S.active.id) === Number(c.id)) S.active.notify = !mute;
+    render();
+    openConvPanel();
+  } catch (e) { toast(e.message, false); }
+}
+
+function contactCard(panel, c, userId) {
+  panel.appendChild(h("div", { class: "section-title", text: "会话信息" }));
+  panel.appendChild(h("div", { class: "profile-hero" },
+    avatarOf({ nickname: c.name } || { nickname: c.name }, "lg"),
+    h("div", {},
+      h("div", { class: "n", text: c.name || "单聊" }),
+      h("div", { class: "s", text: "类型：单聊" }))));
+  const ops = h("div", { class: "ops" });
+  ops.appendChild(h("button", { class: "small", onclick: () => openDirectById(c.partnerId), text: "发消息" }));
+  if (userId) ops.appendChild(h("button", { class: "small danger", onclick: () => deleteFriend(Number(userId)), text: "删除好友" }));
+  ops.appendChild(h("button", { class: "small secondary", onclick: closePanel, text: "关闭" }));
+  panel.appendChild(ops);
+}
+
 function addGroupSettings(panel, c) {
   panel.appendChild(h("div", { class: "p-header" }, h("h3", { text: "群聊设置" }), h("span", { class: "close", onclick: closePanel, text: "✕" })));
   panel.appendChild(h("div", { class: "kv" }, h("span", { text: "我的角色" }), h("b", { text: myRole(c.myRole) })));
 
-  const canRename = ["OWNER", "ADMIN"].includes(c.myRole) || c.myRole === "OWNER";
-  const canNotice = ["OWNER", "ADMIN"].includes(c.myRole) || c.myRole === "OWNER";
+  const canRename = ["OWNER", "ADMIN"].includes(c.myRole);
+  const canNotice = ["OWNER", "ADMIN"].includes(c.myRole);
 
   if (canRename) {
     panel.appendChild(h("label", { text: "群聊名称" }));
@@ -578,15 +730,16 @@ function addGroupSettings(panel, c) {
   panel.appendChild(members);
   loadGroupInfo(c.id).then((g) => {
     activateGroupMembers(members, g, c);
+    S.conv = g;
   });
 
   const ops = h("div", { class: "ops" });
   ops.appendChild(h("button", { class: "small", onclick: () => inviteMembers(c), text: "邀请成员" }));
-  if (c.myRole === "OWNER" || c.myRole === "ADMIN") {
+  if (["OWNER", "ADMIN"].includes(c.myRole)) {
     ops.appendChild(h("button", { class: "small", onclick: () => toggleMuteAll(!(c.muteAll || false)), text: c.muteAll ? "取消全员禁言" : "全员禁言" }));
   }
   if (c.myRole === "OWNER") {
-    ops.appendChild(h("button", { class: "small", onclick: () => transferOwner(c), text: "转让群主" }));
+    ops.appendChild(h("button", { class: "small warn", onclick: () => transferOwner(c), text: "转让群主" }));
     ops.appendChild(h("button", { class: "small danger", onclick: () => disbandGroup(c), text: "解散群" }));
   }
   if (c.myRole !== "OWNER") {
@@ -598,19 +751,20 @@ function addGroupSettings(panel, c) {
 
 function activateGroupMembers(members, g, c) {
   members.replaceChildren();
-  const oid = g.ownerId;
+  members.classList.add("af-results");
   for (const m of g.members || []) {
     const roleTag = m.role === "OWNER" ? "群主" : m.role === "ADMIN" ? "管理员" : "";
-    const canManage = (c.myRole === "OWNER") || (c.myRole === "ADMIN" && m.role === "MEMBER");
+    const isSelf = m.user_id === S.me.id;
+    const canManage = (c.myRole === "OWNER" && !isSelf) || (c.myRole === "ADMIN" && m.role === "MEMBER" && !isSelf);
     members.appendChild(h("div", { class: "frow" },
       avatarOf({ nickname: m.nickname, username: m.username }),
       h("div", { class: "fname" },
-        h("div", { class: "n" }, m.nickname + (m.role === "OWNER" ? "（我）" : "")),
-        h("div", { class: "s", text: "微信号：@" + m.username + (roleTag ? " · " + roleTag : "") })),
+        h("div", { class: "n", text: m.nickname + (isSelf ? "（我）" : "") }),
+        h("div", { class: "s", text: "微信号：" + m.username + (roleTag ? " · " + roleTag : "") })),
       canManage ? h("div", { class: "ops" },
         h("button", { class: "small", onclick: () => muteMember(m.user_id), text: "禁言" }),
         c.myRole === "OWNER" ? h("button", { class: "small secondary", onclick: () => setAdmin(m.user_id, m.role !== "ADMIN"), text: m.role === "ADMIN" ? "取消管理" : "设管理" }) : "",
-        h("button", { class: "small danger", onclick: () => kickUser(m.user_id), text: "移除" })) : ""));
+        h("button", { class: "small danger", onclick: () => kickUser(m.user_id), text: "移出" })) : ""));
   }
 }
 
@@ -635,7 +789,6 @@ async function editNotice() {
     render();
   } catch (e) { toast(e.message, false); }
 }
-
 function myRole(r) {
   return { OWNER: "群主", ADMIN: "群管理员", MEMBER: "成员" }[r] || r;
 }
@@ -643,14 +796,15 @@ async function loadGroupInfo(convId) {
   return await get(`/group/${convId}`);
 }
 async function inviteMembers(c) {
-  const box = h("div", { class: "panel" }, h("h3", { text: "邀请成员" }),
-    h("div", { id: "iv-list" }),
+  const box = h("div", { class: "panel" },
+    h("div", { class: "p-header" }, h("h3", { text: "邀请成员" }), h("span", { class: "close", onclick: closePanel, text: "✕" })),
+    h("div", { id: "iv-list", style: "max-height:240px;overflow-y:auto" }),
     h("div", { class: "ops" }, h("button", { onclick: doInvite, text: "发送邀请" }), h("button", { class: "secondary", onclick: closePanel, text: "取消" })));
   overlay(box);
   const list = document.getElementById("iv-list");
   get("/friends").then((f) => {
     for (const m of f.items || []) {
-      list.appendChild(h("label", { style: "display:flex;gap:8px;padding:4px 0" },
+      list.appendChild(h("label", { style: "display:flex;gap:8px;padding:6px 8px;cursor:pointer" },
         h("input", { type: "checkbox", class: "iv-friend", value: m.userId }),
         h("span", { text: m.nickname })));
     }
@@ -662,6 +816,7 @@ async function doInvite() {
     await post(`/group/${S.active.id}/invite`, { userIds });
     toast("已邀请");
     closePanel();
+    openConvPanel();
   } catch (e) { toast(e.message, false); }
 }
 async function muteMember(userId) {
@@ -672,10 +827,10 @@ async function muteMember(userId) {
   } catch (e) { toast(e.message, false); }
 }
 async function kickUser(userId) {
-  if (!confirm("确定踢出该成员？")) return;
+  if (!confirm("确定将该成员移出群聊？")) return;
   try {
     await post(`/group/${S.active.id}/kick`, { userId });
-    toast("已踢出");
+    toast("已移出");
     openConvPanel();
   } catch (e) { toast(e.message, false); }
 }
@@ -690,14 +845,15 @@ async function toggleMuteAll(mute) {
   try {
     await post(`/group/${S.active.id}/mute-all`, { mute });
     toast(mute ? "已全员禁言" : "已取消全员禁言");
+    S.active.muteAll = mute;
     openConvPanel();
   } catch (e) { toast(e.message, false); }
 }
 async function transferOwner(c) {
-  const userId = prompt("输入新群主 userId");
-  if (!userId) return;
+  const target = prompt("输入新群主的 userId", "");
+  if (!target) return;
   try {
-    await post(`/group/${c.id}/transfer`, { userId: Number(userId) });
+    await post(`/group/${c.id}/transfer`, { userId: Number(target) });
     toast("群主已转让");
     closePanel();
     await refreshConversations();
@@ -725,13 +881,10 @@ async function leaveGroup(c) {
   } catch (e) { toast(e.message, false); }
 }
 
-// ============ 举报 ============
-function openReportMessage(m) {
-  openReport("MESSAGE", m.id, `举报这条消息`);
-}
+// ================= 举报 =================
 function openReport(targetType, targetId, title) {
   const box = h("div", { class: "panel" },
-    h("h3", { text: title }),
+    h("div", { class: "p-header" }, h("h3", { text: title }), h("span", { class: "close", onclick: closePanel, text: "✕" })),
     h("label", { text: "举报类别" }),
     h("select", { id: "rp-cat" },
       h("option", { value: "HARASSMENT", text: "骚扰" }),
@@ -759,14 +912,14 @@ async function submitReport() {
 }
 async function openReports() {
   const box = h("div", { class: "panel", style: "width:520px;max-width:90vw" },
-    h("h3", { text: "我的举报" }),
+    h("div", { class: "p-header" }, h("h3", { text: "我的举报" }), h("span", { class: "close", onclick: closePanel, text: "✕" })),
     h("div", { id: "myreports", style: "max-height:60vh;overflow-y:auto" }),
     h("div", { class: "ops" }, h("button", { class: "secondary", onclick: closePanel, text: "关闭" })));
   overlay(box);
   const list = document.getElementById("myreports");
   const res = await get("/reports/mine").catch((e) => { toast(e.message, false); return { items: [] }; });
   for (const r of res.items || []) {
-    list.appendChild(h("div", { class: "frow", style: "flex-direction:column;align-items:flex-start" },
+    list.appendChild(h("div", { class: "frow", style: "flex-direction:column;align-items:flex-start;border:1px solid #f2f2f2;border-radius:8px;margin:6px 0" },
       h("div", { style: "display:flex;justify-content:space-between;width:100%" },
         h("span", { text: `${targetLabel(r.targetType)} #${r.targetId} · ${catLabel(r.category)}` }),
         h("span", { class: "badge", text: statusLabel(r.status) })),
@@ -776,18 +929,44 @@ async function openReports() {
   if (!(res.items || []).length) list.appendChild(h("div", { class: "empty", text: "还没有举报记录" }));
 }
 function targetLabel(t) { return { MESSAGE: "消息", USER: "用户", GROUP: "群" }[t] || t; }
-function catLabel(c) {
-  return { HARASSMENT: "骚扰", AD: "广告", ILLEGAL: "违法", PORNOGRAPHY: "涉黄", FRAUD: "诈骗", OTHER: "其他" }[c] || c;
+function catLabel(c) { return { HARASSMENT: "骚扰", AD: "广告", ILLEGAL: "违法", PORNOGRAPHY: "涉黄", FRAUD: "诈骗", OTHER: "其他" }[c] || c; }
+function statusLabel(s) { return { PENDING: "待处理", REVIEWING: "处理中", ESCALATED: "已升级", PUNISHED: "已处罚", REJECTED: "已驳回", APPEALING: "申诉中", SUSTAINED: "维持处罚", REVERTED: "已撤销" }[s] || s; }
+
+// ================= 个人资料 =================
+function openProfile() {
+  const box = h("div", { class: "panel" },
+    h("div", { class: "p-header" }, h("h3", { text: "个人信息" }), h("span", { class: "close", onclick: closePanel, text: "✕" })),
+    h("div", { class: "profile-hero" },
+      avatarOf(S.me, "lg"),
+      h("div", {},
+        h("div", { class: "n", text: S.me.nickname }),
+        h("div", { class: "s", text: "用户名：@" + S.me.username + " · " + roleLabel(S.me.role) }))),
+    h("label", { text: "微信号（可自定义，字母开头、6-20 位）" }),
+    h("div", { class: "inline-form" },
+      h("input", { id: "pf-wechat", placeholder: "填写你的微信号", value: S.me.wechatId || "", onkeydown: (e) => { if (e.key === "Enter") saveWechat(); } }),
+      h("button", { onclick: saveWechat, text: "保存" })),
+    h("div", { class: "note", text: "微信号是别人搜索并添加你的唯一标识，请谨慎设置。" }),
+    h("div", { class: "ops" },
+      h("button", { class: "danger", onclick: doLogout, text: "退出登录" }),
+      h("button", { class: "secondary", onclick: closePanel, text: "关闭" })));
+  overlay(box);
+  const inp = document.getElementById("pf-wechat");
+  if (inp) inp.focus();
 }
-function statusLabel(s) {
-  return {
-    PENDING: "待处理", REVIEWING: "处理中", ESCALATED: "已升级", PUNISHED: "已处罚",
-    REJECTED: "已驳回", APPEALING: "申诉中", SUSTAINED: "维持处罚", REVERTED: "已撤销",
-  }[s] || s;
+async function saveWechat() {
+  const wechatId = document.getElementById("pf-wechat").value.trim();
+  try {
+    const res = await post("/users/wechat", { wechatId });
+    S.me.wechatId = res.wechatId;
+    setUser(S.me);
+    toast("微信号已更新");
+    closePanel();
+    render();
+  } catch (e) { toast(e.message, false); }
 }
 
-// ============ 工具 ============
-function overlay(content) {
+// ================= 通用 =================
+function overlay(content, opts = {}) {
   const ov = h("div", { class: "panel-overlay" }, content);
   ov.addEventListener("click", (e) => { if (e.target === ov) ov.remove(); });
   document.body.appendChild(ov);
@@ -796,14 +975,56 @@ function overlay(content) {
 function closePanel() {
   document.querySelectorAll(".panel-overlay").forEach((n) => n.remove());
 }
-function timeStr(ts) {
-  if (!ts) return "";
-  return new Date(ts).toLocaleString("zh-CN");
+
+// ---------- 表情面板 ----------
+function emojiPanel() {
+  const emojis = ["😀","😁","😂","🤣","😊","😍","🤔","😅","😉","😎","🙃","😴","🥳","😭","😡","🤝","👍","👎","👏","🙏","💪","🎉","❤️","💔","🌹","🌞","🌙","☀️","🔥","⚡","🍎","☕","🐶","🐱","✌️","🤗","😇","🤩","😌","😏"];
+  return h("div", { class: "panel", style: "width:300px" }, h("div", { class: "af-results" },
+    ...emojis.map((e) => h("span", { class: "clickable", style: "margin:12px;font-size:24px", "data-em": e, text: e }))));
 }
 
-// ============ 启动 ============
-if (isLoggedIn()) {
-  bootstrap();
-} else {
-  renderLogin();
+// ================= 启动 =================
+if (isLoggedIn()) bootstrap();
+else renderLogin();
+
+// ================= SVG 图标 =================
+function chatSvg() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 11.5c0 4.14-4.03 7.5-9 7.5-1.15 0-2.25-.16-3.27-.46L4 20l1.53-2.01C4.17 16.7 3 14.42 3 11.5 3 7.36 7.03 4 12 4s9 3.36 9 7.5z"/></svg>`;
+}
+function contactSvg() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="3" width="16" height="18" rx="2"/><circle cx="12" cy="10" r="3"/><path d="M7 17c.7-1.8 2.7-2.5 5-2.5s4.3.7 5 2.5"/></svg>`;
+}
+function searchSvg() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>`;
+}
+function plusSvg() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>`;
+}
+function groupSvg() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="8" r="3"/><circle cx="16" cy="10" r="2.5"/><path d="M4 20c.7-3 2.7-4 5-4s4.3 1 5 4M14.5 16.7c2.4 0 4.3.8 5 3.3"/></svg>`;
+}
+function flagSvg() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 3v18M5 4h13l-2.5 4L18 12H5"/></svg>`;
+}
+function infoSvg() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>`;
+}
+function emojiSvg() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/></svg>`;
+}
+function photoSvg() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m4 17 5-5 3 3 4-4 4 4"/></svg>`;
+}
+function gearSvg() {
+  return `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h0a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h0a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v0a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>`;
+}
+function wechatLogoSvg() {
+  return `<svg viewBox="0 0 120 120" fill="none">
+    <rect x="8" y="16" width="66" height="48" rx="10" fill="#e5e5e5"/>
+    <rect x="44" y="48" width="66" height="48" rx="10" fill="#fff" stroke="#e2e2e2"/>
+    <circle cx="36" cy="40" r="4" fill="#c9c9c9"/>
+    <circle cx="52" cy="40" r="4" fill="#c9c9c9"/>
+    <circle cx="74" cy="68" r="4" fill="#d9d9d9"/>
+    <circle cx="90" cy="68" r="4" fill="#d9d9d9"/>
+  </svg>`;
 }

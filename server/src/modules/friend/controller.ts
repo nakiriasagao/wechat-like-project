@@ -18,14 +18,18 @@ function relationBetween(a: number, b: number) {
   return { status: FriendStatus.BLOCKED_BY, row };
 }
 
-/** 搜索用户（用于加好友） */
+/** 搜索用户（按微信号/用户名/昵称），并返回与当前用户的关系（NONE/PENDING/REQUESTED/ACCEPTED/BLOCKED/BLOCKED_BY） */
 export function search(req: Request, res: Response) {
   const q = String(req.query.q ?? "").trim();
   if (!q) return res.json({ items: [] });
   const rows = getDb()
-    .prepare("SELECT id, username, nickname FROM users WHERE username LIKE ? AND id != ? LIMIT 20")
-    .all(`%${q}%`, req.user!.id);
-  res.json({ items: rows });
+    .prepare("SELECT id, username, nickname, wechat_id as wechatId FROM users WHERE (wechat_id LIKE ? OR username LIKE ? OR nickname LIKE ?) AND id != ? LIMIT 20")
+    .all(`%${q}%`, `%${q}%`, `%${q}%`, req.user!.id) as any[];
+  const items = rows.map((r) => {
+    const { status } = relationBetween(req.user!.id, r.id);
+    return { id: r.id, username: r.username, nickname: r.nickname, wechatId: r.wechatId, relation: status };
+  });
+  res.json({ items });
 }
 
 /** 发送好友申请（可附验证消息） */
@@ -55,12 +59,12 @@ export function listFriends(req: Request, res: Response) {
   const db = getDb();
   const rows = db
     .prepare(
-      `SELECT f.*, u.id as uid, u.nickname, u.username FROM friendships f
+      `SELECT f.*, u.id as uid, u.nickname, u.username, u.wechat_id as wechatId FROM friendships f
        JOIN users u ON u.id = (CASE WHEN f.user_a = ? THEN f.user_b ELSE f.user_a END)
        WHERE (f.user_a = ? OR f.user_b = ?) AND f.status = 'ACCEPTED'`
     )
     .all(req.user!.id, req.user!.id, req.user!.id);
-  res.json({ items: rows.map((r: any) => ({ userId: r.uid, nickname: r.nickname, username: r.username })) });
+  res.json({ items: rows.map((r: any) => ({ userId: r.uid, nickname: r.nickname, username: r.username, wechatId: r.wechatId })) });
 }
 
 /** 我的待处理 / 申请列表（friendships 统一存 user_a=min、user_b=max，requester=发起方） */
@@ -69,16 +73,18 @@ export function listRequests(req: Request, res: Response) {
   // 收到的申请：对方（requester）发起，我作为另一端点
   const incoming = db
     .prepare(
-      `SELECT f.requester, f.message, u.nickname, u.username, f.updated_at FROM friendships f
+      `SELECT f.requester, f.message, u.nickname, u.username, u.wechat_id as wechatId, f.updated_at FROM friendships f
        JOIN users u ON u.id = f.requester
        WHERE f.status = 'PENDING' AND f.requester != ? AND (f.user_a = ? OR f.user_b = ?)`
     )
     .all(req.user!.id, req.user!.id, req.user!.id);
-  // 我发出的申请：requester 是我，对方是另一端点
+  // 我发出的申请：requester 是我，对方是另一端点（user_a=min、user_b=max，故需 CASE 取目标）
   const outgoing = db
     .prepare(
-      `SELECT f.user_b as uid, f.message, u.nickname, u.username, f.updated_at FROM friendships f
-       JOIN users u ON u.id = f.user_b
+      `SELECT CASE WHEN f.user_a = f.requester THEN f.user_b ELSE f.user_a END as uid,
+              f.message, u.nickname, u.username, u.wechat_id as wechatId, f.updated_at
+       FROM friendships f
+       JOIN users u ON u.id = CASE WHEN f.user_a = f.requester THEN f.user_b ELSE f.user_a END
        WHERE f.status = 'PENDING' AND f.requester = ?`
     )
     .all(req.user!.id);
@@ -89,7 +95,7 @@ export function listRequests(req: Request, res: Response) {
 export function listBlocked(req: Request, res: Response) {
   const items = getDb()
     .prepare(
-      `SELECT u.id as userId, u.nickname, u.username FROM friendships f
+      `SELECT u.id as userId, u.nickname, u.username, u.wechat_id as wechatId FROM friendships f
        JOIN users u ON u.id = (CASE WHEN f.user_a = ? THEN f.user_b ELSE f.user_a END)
        WHERE f.requester = ? AND f.status = 'BLOCKED'`
     )
